@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "easy-autoresearch"
+version = "0.1.0"
+description = "Placeholder package used to reserve the easy-autoresearch name on PyPI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Darius Schaub" },
+]
+classifiers = [
+  "Development Status :: 1 - Planning",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/dschaub95/easy-autoresearch"
+Repository = "https://github.com/dschaub95/easy-autoresearch"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/easy_autoresearch"]
