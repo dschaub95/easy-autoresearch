@@ -1,6 +1,23 @@
+# Virtual environment
 .venv/
-*.pyc
+
+# Python
 __pycache__/
-dist/
+*.pyc
+
+# Build / packaging
 build/
+dist/
 *.egg-info/
+
+# Tests & coverage
+.pytest_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# Local secrets
+.env
+
+# Project
+.references/

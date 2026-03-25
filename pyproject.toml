@@ -1,30 +1,98 @@
 [build-system]
-requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
+requires = [ "hatchling>=1.27" ]
 
 [project]
 name = "easy-autoresearch"
 version = "0.1.0"
 description = "Placeholder package used to reserve the easy-autoresearch name on PyPI."
 readme = "README.md"
-requires-python = ">=3.10"
 license = "MIT"
 authors = [
   { name = "Darius Schaub" },
 ]
+requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 1 - Planning",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
-  "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Software Development :: Libraries",
 ]
+urls.Homepage = "https://github.com/dschaub95/easy-autoresearch"
+urls.Repository = "https://github.com/dschaub95/easy-autoresearch"
 
-[project.urls]
-Homepage = "https://github.com/dschaub95/easy-autoresearch"
-Repository = "https://github.com/dschaub95/easy-autoresearch"
+[project.optional-dependencies]
+dev = [
+  "pre-commit",
+  "ruff>=0.15.5",
+  "twine>=4.0.2",
+]
+test = [
+  "coverage>=7.10",
+  "pytest",
+  "pytest-cov",
+]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/easy_autoresearch"]
+[project.scripts]
+format = "easy_autoresearch.cli:format"
+
+[tool.hatch]
+build.targets.wheel.packages = [ "src/easy_autoresearch" ]
+
+[tool.ruff]
+line-length = 88
+src = [ "src" ]
+extend-include = [ "*.ipynb" ]
+format.docstring-code-format = true
+lint.select = [
+  "B",      # flake8-bugbear
+  "BLE",    # flake8-blind-except
+  "C4",     # flake8-comprehensions
+  "D",      # pydocstyle
+  "E",      # Error detected by Pycodestyle
+  "F",      # Errors detected by Pyflakes
+  "I",      # isort
+  "RUF100", # Report unused noqa directives
+  "TID",    # flake8-tidy-imports
+  "UP",     # pyupgrade
+  "W",      # Warning detected by Pycodestyle
+]
+lint.ignore = [
+  "B008", # Errors from function calls in argument defaults. These are fine when the result is immutable.
+  "D100", # Missing docstring in public module
+  "D104", # Missing docstring in public package
+  "D105", # __magic__ methods are often self-explanatory, allow missing docstrings
+  "D107", # Missing docstring in __init__
+  # Disable one in each pair of mutually incompatible rules
+  "D203", # We don’t want a blank line before a class docstring
+  "D213", # <> We want docstrings to start immediately after the opening triple quote
+  "D400", # first line should end with a period [Bug: doesn’t work with single-line docstrings]
+  "D401", # First line should be in imperative mood; try rephrasing
+  "E501", # line too long -> we accept long comment lines; formatter gets rid of long code lines
+  "E731", # Do not assign a lambda expression, use a def -> lambda expression assignments are convenient
+  "E741", # allow I, O, l as variable names -> I is the identity matrix
+]
+lint.per-file-ignores."*/__init__.py" = [ "F401" ]
+lint.per-file-ignores."docs/*" = [ "I" ]
+lint.per-file-ignores."tests/*" = [ "D" ]
+lint.pydocstyle.convention = "numpy"
+
+[tool.pytest]
+strict = true
+testpaths = [ "tests" ]
+addopts = [
+  "--import-mode=importlib", # allow using test files with same name
+]
+
+[tool.coverage]
+run.omit = [
+  "**/test_*.py",
+]
+run.patch = [ "subprocess" ]
+run.source = [ "easy_autoresearch" ]
