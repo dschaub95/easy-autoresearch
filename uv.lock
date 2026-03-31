@@ -385,16 +385,19 @@ wheels = [
 name = "easy-autoresearch"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "pyyaml" },
+]
 
 [package.optional-dependencies]
 dev = [
     { name = "pre-commit" },
+    { name = "pytest" },
     { name = "ruff" },
     { name = "twine" },
 ]
 test = [
     { name = "coverage" },
-    { name = "pytest" },
     { name = "pytest-cov" },
 ]
 
@@ -402,8 +405,9 @@ test = [
 requires-dist = [
     { name = "coverage", marker = "extra == 'test'", specifier = ">=7.10" },
     { name = "pre-commit", marker = "extra == 'dev'" },
-    { name = "pytest", marker = "extra == 'test'" },
+    { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'test'" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.5" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=4.0.2" },
 ]

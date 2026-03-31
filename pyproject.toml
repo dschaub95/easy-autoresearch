@@ -5,13 +5,16 @@ requires = [ "hatchling>=1.27" ]
 [project]
 name = "easy-autoresearch"
 version = "0.1.0"
-description = "Placeholder package used to reserve the easy-autoresearch name on PyPI."
+description = "Scaffolding for autonomous repository optimization loops driven by coding agents."
 readme = "README.md"
 license = "MIT"
 authors = [
   { name = "Darius Schaub" },
 ]
 requires-python = ">=3.10"
+dependencies = [
+  "PyYAML>=6.0",
+]
 classifiers = [
   "Development Status :: 1 - Planning",
   "Intended Audience :: Developers",
@@ -30,17 +33,17 @@ urls.Repository = "https://github.com/dschaub95/easy-autoresearch"
 [project.optional-dependencies]
 dev = [
   "pre-commit",
+  "pytest",
   "ruff>=0.15.5",
   "twine>=4.0.2",
 ]
 test = [
   "coverage>=7.10",
-  "pytest",
   "pytest-cov",
 ]
 
 [project.scripts]
-format = "easy_autoresearch.cli:format"
+"easy-autoresearch" = "easy_autoresearch.main:main"
 
 [tool.hatch]
 build.targets.wheel.packages = [ "src/easy_autoresearch" ]
@@ -66,6 +69,9 @@ lint.select = [
 lint.ignore = [
   "B008", # Errors from function calls in argument defaults. These are fine when the result is immutable.
   "D100", # Missing docstring in public module
+  "D101", # Missing docstring in public class
+  "D102", # Missing docstring in public method
+  "D103", # Missing docstring in public function
   "D104", # Missing docstring in public package
   "D105", # __magic__ methods are often self-explanatory, allow missing docstrings
   "D107", # Missing docstring in __init__

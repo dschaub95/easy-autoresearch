@@ -1,4 +1,4 @@
-"""Minimal placeholder package for reserving the easy-autoresearch name on PyPI."""
+"""Scaffolding for autonomous repository optimization loops."""
 
 __all__ = ["__version__"]
 
