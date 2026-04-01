@@ -43,6 +43,12 @@ Starting a session:
 - stores each run's output and metric in SQLite
 - stops early when an experiment completes successfully
 
+## Development
+
+```bash
+uvx --from /home/dschaub/projects/method-projects/easy-autoresearch easy-autoresearch
+```
+
 ## Default Config Shape
 
 ```yaml
