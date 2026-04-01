@@ -26,6 +26,12 @@ CREATE TABLE IF NOT EXISTS experiments (
     max_runs INTEGER NOT NULL,
     status TEXT NOT NULL,
     best_metric REAL,
+    agent_provider TEXT,
+    agent_session_id TEXT,
+    summary TEXT,
+    summary_path TEXT,
+    agent_log_path TEXT,
+    agent_stderr_path TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -47,6 +53,22 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 """
 
+
+def ensure_column(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    existing_columns = {
+        row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")
+    }
+    if column_name not in existing_columns:
+        connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
@@ -58,6 +80,12 @@ def initialize_database(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as connection:
         connection.executescript(SCHEMA)
+        ensure_column(connection, "experiments", "agent_provider", "TEXT")
+        ensure_column(connection, "experiments", "agent_session_id", "TEXT")
+        ensure_column(connection, "experiments", "summary", "TEXT")
+        ensure_column(connection, "experiments", "summary_path", "TEXT")
+        ensure_column(connection, "experiments", "agent_log_path", "TEXT")
+        ensure_column(connection, "experiments", "agent_stderr_path", "TEXT")
 
 
 def insert_row(
@@ -119,6 +147,7 @@ def create_experiment(
     description: str,
     max_runs: int,
     status: str,
+    agent_provider: str | None,
     created_at: str,
     updated_at: str,
 ) -> int:
@@ -126,10 +155,20 @@ def create_experiment(
         connection,
         """
         INSERT INTO experiments (
-            session_id, kind, description, max_runs, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            session_id, kind, description, max_runs, status, agent_provider,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (session_id, kind, description, max_runs, status, created_at, updated_at),
+        (
+            session_id,
+            kind,
+            description,
+            max_runs,
+            status,
+            agent_provider,
+            created_at,
+            updated_at,
+        ),
     )
 
 
@@ -140,15 +179,31 @@ def update_experiment(
     status: str,
     updated_at: str,
     best_metric: float | None = None,
+    agent_session_id: str | None = None,
+    summary: str | None = None,
+    summary_path: str | None = None,
+    agent_log_path: str | None = None,
+    agent_stderr_path: str | None = None,
 ) -> None:
     execute(
         connection,
         """
         UPDATE experiments
-        SET status = ?, updated_at = ?, best_metric = ?
+        SET status = ?, updated_at = ?, best_metric = ?, agent_session_id = ?,
+            summary = ?, summary_path = ?, agent_log_path = ?, agent_stderr_path = ?
         WHERE id = ?
         """,
-        (status, updated_at, best_metric, experiment_id),
+        (
+            status,
+            updated_at,
+            best_metric,
+            agent_session_id,
+            summary,
+            summary_path,
+            agent_log_path,
+            agent_stderr_path,
+            experiment_id,
+        ),
     )
 
 
@@ -194,5 +249,14 @@ def finish_run(
             log_path = ?, finished_at = ?
         WHERE id = ?
         """,
-        (status, exit_code, stdout, stderr, metric_value, log_path, finished_at, run_id),
+        (
+            status,
+            exit_code,
+            stdout,
+            stderr,
+            metric_value,
+            log_path,
+            finished_at,
+            run_id,
+        ),
     )

@@ -12,6 +12,7 @@ CONFIG_FILENAME = "autoresearch.yaml"
 STATE_DIRNAME = ".autoresearch"
 DB_FILENAME = "state.db"
 PROMPTS_DIRNAME = "prompts"
+LOGS_DIRNAME = "logs"
 DEFAULT_BASELINE_LOG = "baseline.log"
 CODEX_SYSTEM_PROMPT = """# Codex System Prompt
 
@@ -45,6 +46,10 @@ def prompts_dir(repo_path: Path) -> Path:
     return state_dir(repo_path) / PROMPTS_DIRNAME
 
 
+def logs_dir(repo_path: Path) -> Path:
+    return state_dir(repo_path) / LOGS_DIRNAME
+
+
 @dataclass(slots=True)
 class ProjectConfig:
     repo_path: str
@@ -55,6 +60,8 @@ class ProjectConfig:
 class CommandsConfig:
     baseline: str = "uv run pytest"
     metric_pattern: str | None = None
+    agent_run: str = "uv run pytest"
+    agent_metric_pattern: str | None = None
 
 
 @dataclass(slots=True)
@@ -64,13 +71,13 @@ class SessionConfig:
 
 @dataclass(slots=True)
 class ExperimentsConfig:
-    max_experiments: int = 1
+    max_experiments: int = 0
     max_runs_per_experiment: int = 1
 
 
 @dataclass(slots=True)
-class CodexConfig:
-    command: str = "codex"
+class AgentConfig:
+    provider: str = "codex"
     prompt_template: str = ".autoresearch/prompts/codex-system.md"
 
 
@@ -80,7 +87,7 @@ class AutoResearchConfig:
     commands: CommandsConfig = field(default_factory=CommandsConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     experiments: ExperimentsConfig = field(default_factory=ExperimentsConfig)
-    codex: CodexConfig = field(default_factory=CodexConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
     editable_paths: list[str] = field(default_factory=list)
     readonly_paths: list[str] = field(default_factory=list)
 
@@ -90,13 +97,20 @@ class AutoResearchConfig:
         commands_data = data.get("commands") or {}
         session_data = data.get("session") or {}
         experiments_data = data.get("experiments") or {}
-        codex_data = data.get("codex") or {}
+        agent_data = data.get("agent") or {}
+        if not agent_data and (codex_data := data.get("codex") or {}):
+            agent_data = {
+                "provider": "codex",
+                "prompt_template": codex_data.get(
+                    "prompt_template", AgentConfig().prompt_template
+                ),
+            }
         return cls(
             project=ProjectConfig(**project_data),
             commands=CommandsConfig(**commands_data),
             session=SessionConfig(**session_data),
             experiments=ExperimentsConfig(**experiments_data),
-            codex=CodexConfig(**codex_data),
+            agent=AgentConfig(**agent_data),
             editable_paths=list(data.get("editable_paths") or []),
             readonly_paths=list(data.get("readonly_paths") or []),
         )

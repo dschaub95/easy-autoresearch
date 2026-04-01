@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .agent import CodingAgent
+from .codex import Codex
 from .config import (
     CODEX_SYSTEM_PROMPT,
     AutoResearchConfig,
@@ -17,6 +19,7 @@ from .config import (
     db_path,
     default_config_for_repo,
     load_config,
+    logs_dir,
     prompts_dir,
     state_dir,
     write_config,
@@ -47,6 +50,12 @@ class CommandResult:
     metric_value: float | None
 
 
+def create_agent(config: AutoResearchConfig, repo_path: Path) -> CodingAgent:
+    if config.agent.provider != "codex":
+        raise ValueError(f"Unsupported agent provider: {config.agent.provider}")
+    return Codex(repo_path)
+
+
 class AutoResearch:
     """Session-scoped application state and workflow."""
 
@@ -59,12 +68,15 @@ class AutoResearch:
         self.config = config
         self.config_file = config_path(self.repo_path)
         self.state_dir = state_dir(self.repo_path)
+        self.logs_dir = logs_dir(self.repo_path)
         self.prompts_dir = prompts_dir(self.repo_path)
         self.database_path = db_path(self.repo_path)
+        self.ready_to_start = True
 
     def scaffold_repo(self) -> None:
         self.repo_path.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.prompts_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = self.prompts_dir / "codex-system.md"
         if not prompt_path.exists():
@@ -104,13 +116,42 @@ class AutoResearch:
 
         if not self.has_existing_setup():
             self.scaffold_repo()
+            if not prompt_for_config_review(self.config_file):
+                print("Cancelled after scaffolding so you can adjust the config.")
+                self.ready_to_start = False
+                return
+            self.prepare_repo_setup()
+            if not prompt_for_setup_review(self.repo_path):
+                print("Cancelled after setup so you can review the changes.")
+                self.ready_to_start = False
+                return
             print(f"Scaffolded easy-autoresearch files in {self.repo_path}")
             print(f"Config: {self.config_file}")
         elif self.config is None:
             self.config = load_config(self.repo_path)
 
+    def prepare_repo_setup(self) -> None:
+        template = self.load_prompt_template()
+        result = create_agent(self.require_config(), self.repo_path).run(
+            self.build_setup_prompt(template),
+            output_path=self.logs_dir / "setup.agent.jsonl",
+            stderr_path=self.logs_dir / "setup.agent.stderr.log",
+            timeout_seconds=self.require_config().session.max_duration_seconds,
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(
+                "Agent setup failed. Check "
+                f"{result.output_path.relative_to(self.repo_path)} and "
+                f"{result.stderr_path.relative_to(self.repo_path)}."
+            )
+        self.config = load_config(self.repo_path)
+
     def start(self) -> int:
         config = self.require_config()
+        if not self.ready_to_start:
+            return 0
+        self.validate_config()
+
         started_at = utc_now()
         with connect(self.database_path) as connection:
             session_id = create_session(
@@ -125,76 +166,50 @@ class AutoResearch:
             experiment_count = 0
             total_run_count = 0
             session_status = "failed"
+            baseline_started_at = utc_now()
+            baseline_experiment_id = create_experiment(
+                connection,
+                session_id=session_id,
+                kind="baseline",
+                description="Initial baseline execution",
+                max_runs=config.experiments.max_runs_per_experiment,
+                status="running",
+                agent_provider=None,
+                created_at=baseline_started_at,
+                updated_at=baseline_started_at,
+            )
+            baseline_status, _, baseline_run_count = self.run_baseline_experiment(
+                connection,
+                experiment_id=baseline_experiment_id,
+                experiment_index=1,
+            )
+            total_run_count += baseline_run_count
+            if (
+                baseline_status == "completed"
+                and config.experiments.max_experiments == 0
+            ):
+                session_status = "completed"
+
             for experiment_index in range(1, config.experiments.max_experiments + 1):
                 experiment_count += 1
                 experiment_started_at = utc_now()
-                experiment_kind = "baseline" if experiment_index == 1 else "candidate"
-                description = (
-                    "Initial baseline execution"
-                    if experiment_index == 1
-                    else f"Candidate experiment {experiment_index}"
-                )
                 experiment_id = create_experiment(
                     connection,
                     session_id=session_id,
-                    kind=experiment_kind,
-                    description=description,
+                    kind="candidate",
+                    description=f"Candidate experiment {experiment_index}",
                     max_runs=config.experiments.max_runs_per_experiment,
                     status="running",
+                    agent_provider=config.agent.provider,
                     created_at=experiment_started_at,
                     updated_at=experiment_started_at,
                 )
-
-                best_metric: float | None = None
-                experiment_status = "failed"
-                for run_index in range(1, config.experiments.max_runs_per_experiment + 1):
-                    total_run_count += 1
-                    run_started_at = utc_now()
-                    run_id = create_run(
-                        connection,
-                        experiment_id=experiment_id,
-                        run_index=run_index,
-                        command=config.commands.baseline,
-                        status="running",
-                        started_at=run_started_at,
-                        created_at=run_started_at,
-                    )
-                    result = run_command(
-                        config.commands.baseline,
-                        cwd=self.repo_path,
-                        timeout_seconds=config.session.max_duration_seconds,
-                        metric_pattern=config.commands.metric_pattern,
-                    )
-                    log_path = (
-                        self.state_dir / f"experiment-{experiment_index}-run-{run_index}.log"
-                    )
-                    log_path.write_text(result.stdout, encoding="utf-8")
-                    finish_run(
-                        connection,
-                        run_id=run_id,
-                        status=result.status,
-                        exit_code=result.exit_code,
-                        stdout=result.stdout,
-                        stderr=result.stderr,
-                        metric_value=result.metric_value,
-                        log_path=str(log_path.relative_to(self.repo_path)),
-                        finished_at=utc_now(),
-                    )
-                    if result.metric_value is not None and (
-                        best_metric is None or result.metric_value > best_metric
-                    ):
-                        best_metric = result.metric_value
-                    if result.status == "completed":
-                        experiment_status = "completed"
-                        break
-
-                update_experiment(
+                experiment_status, _, run_count = self.run_agent_experiment(
                     connection,
                     experiment_id=experiment_id,
-                    status=experiment_status,
-                    updated_at=utc_now(),
-                    best_metric=best_metric,
+                    experiment_index=experiment_index,
                 )
+                total_run_count += run_count
                 if experiment_status == "completed":
                     session_status = "completed"
                     break
@@ -205,18 +220,304 @@ class AutoResearch:
                 status=session_status,
                 finished_at=utc_now(),
             )
-        session_id, run_count = session_id, total_run_count
+
         print(
             "Started session "
-            f"{session_id} with {experiment_count} experiment(s) "
-            f"and {run_count} run(s) ({session_status})."
+            f"{session_id} with 1 baseline run and {experiment_count} experiment(s) "
+            f"and {total_run_count} run(s) ({session_status})."
         )
         return 0 if session_status == "completed" else 1
+
+    def run_baseline_experiment(
+        self,
+        connection,
+        *,
+        experiment_id: int,
+        experiment_index: int,
+    ) -> tuple[str, float | None, int]:
+        config = self.require_config()
+        best_metric: float | None = None
+        experiment_status = "failed"
+        run_count = 0
+        for run_index in range(1, config.experiments.max_runs_per_experiment + 1):
+            run_count += 1
+            run_started_at = utc_now()
+            run_id = create_run(
+                connection,
+                experiment_id=experiment_id,
+                run_index=run_index,
+                command=config.commands.baseline,
+                status="running",
+                started_at=run_started_at,
+                created_at=run_started_at,
+            )
+            result = run_command(
+                config.commands.baseline,
+                cwd=self.repo_path,
+                timeout_seconds=config.session.max_duration_seconds,
+                metric_pattern=config.commands.metric_pattern,
+            )
+            log_path = (
+                self.state_dir / f"experiment-{experiment_index}-run-{run_index}.log"
+            )
+            log_path.write_text(result.stdout, encoding="utf-8")
+            finish_run(
+                connection,
+                run_id=run_id,
+                status=result.status,
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                metric_value=result.metric_value,
+                log_path=str(log_path.relative_to(self.repo_path)),
+                finished_at=utc_now(),
+            )
+            if result.metric_value is not None and (
+                best_metric is None or result.metric_value > best_metric
+            ):
+                best_metric = result.metric_value
+            if result.status == "completed":
+                experiment_status = "completed"
+                break
+
+        update_experiment(
+            connection,
+            experiment_id=experiment_id,
+            status=experiment_status,
+            updated_at=utc_now(),
+            best_metric=best_metric,
+        )
+        return experiment_status, best_metric, run_count
+
+    def run_agent_experiment(
+        self,
+        connection,
+        *,
+        experiment_id: int,
+        experiment_index: int,
+    ) -> tuple[str, float | None, int]:
+        config = self.require_config()
+        agent = create_agent(config, self.repo_path)
+        template = self.load_prompt_template()
+        best_metric: float | None = None
+        experiment_status = "failed"
+        run_count = 0
+        last_agent_log_path: Path | None = None
+        last_agent_stderr_path: Path | None = None
+        last_result: CommandResult | None = None
+
+        for run_index in range(1, config.experiments.max_runs_per_experiment + 1):
+            run_count += 1
+            run_started_at = utc_now()
+            run_id = create_run(
+                connection,
+                experiment_id=experiment_id,
+                run_index=run_index,
+                command=config.commands.agent_run,
+                status="running",
+                started_at=run_started_at,
+                created_at=run_started_at,
+            )
+            last_agent_log_path = (
+                self.logs_dir
+                / f"experiment-{experiment_index}-run-{run_index}.agent.jsonl"
+            )
+            last_agent_stderr_path = (
+                self.logs_dir
+                / f"experiment-{experiment_index}-run-{run_index}.agent.stderr.log"
+            )
+            agent_result = agent.run(
+                self.build_agent_prompt(template, experiment_index, run_index),
+                output_path=last_agent_log_path,
+                stderr_path=last_agent_stderr_path,
+                timeout_seconds=config.session.max_duration_seconds,
+            )
+            if agent_result.exit_code != 0:
+                finish_run(
+                    connection,
+                    run_id=run_id,
+                    status="failed",
+                    exit_code=agent_result.exit_code,
+                    stdout=agent_result.text,
+                    stderr=agent_result.stderr,
+                    metric_value=None,
+                    log_path=str(last_agent_log_path.relative_to(self.repo_path)),
+                    finished_at=utc_now(),
+                )
+                continue
+
+            result = run_command(
+                config.commands.agent_run,
+                cwd=self.repo_path,
+                timeout_seconds=config.session.max_duration_seconds,
+                metric_pattern=config.commands.agent_metric_pattern,
+            )
+            if result.metric_value is None:
+                result = CommandResult(
+                    command=result.command,
+                    exit_code=result.exit_code,
+                    stdout=result.stdout,
+                    stderr=(
+                        f"{result.stderr}\nNo metric matched pattern "
+                        f"{config.commands.agent_metric_pattern!r}."
+                    ).strip(),
+                    status="failed",
+                    metric_value=None,
+                )
+            last_result = result
+            run_log_path = (
+                self.state_dir / f"experiment-{experiment_index}-run-{run_index}.log"
+            )
+            run_log_path.write_text(result.stdout, encoding="utf-8")
+            finish_run(
+                connection,
+                run_id=run_id,
+                status=result.status,
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                metric_value=result.metric_value,
+                log_path=str(run_log_path.relative_to(self.repo_path)),
+                finished_at=utc_now(),
+            )
+            if result.metric_value is not None and (
+                best_metric is None or result.metric_value > best_metric
+            ):
+                best_metric = result.metric_value
+            if result.status == "completed":
+                experiment_status = "completed"
+                break
+
+        summary_text = self.build_fallback_summary(last_result)
+        summary_path = self.logs_dir / f"experiment-{experiment_index}-summary.md"
+        if agent.session_id:
+            summary_result = agent.run(
+                self.build_summary_prompt(last_result),
+                output_path=self.logs_dir
+                / f"experiment-{experiment_index}-summary.agent.jsonl",
+                stderr_path=self.logs_dir
+                / f"experiment-{experiment_index}-summary.agent.stderr.log",
+                timeout_seconds=config.session.max_duration_seconds,
+            )
+            if summary_result.text:
+                summary_text = summary_result.text
+        summary_path.write_text(summary_text, encoding="utf-8")
+        update_experiment(
+            connection,
+            experiment_id=experiment_id,
+            status=experiment_status,
+            updated_at=utc_now(),
+            best_metric=best_metric,
+            agent_session_id=agent.session_id,
+            summary=summary_text,
+            summary_path=str(summary_path.relative_to(self.repo_path)),
+            agent_log_path=(
+                str(last_agent_log_path.relative_to(self.repo_path))
+                if last_agent_log_path is not None
+                else None
+            ),
+            agent_stderr_path=(
+                str(last_agent_stderr_path.relative_to(self.repo_path))
+                if last_agent_stderr_path is not None
+                else None
+            ),
+        )
+        return experiment_status, best_metric, run_count
+
+    def build_agent_prompt(
+        self, template: str, experiment_index: int, run_index: int
+    ) -> str:
+        config = self.require_config()
+        return "\n\n".join(
+            part
+            for part in [
+                template,
+                (
+                    f"Experiment {experiment_index}, attempt {run_index}. "
+                    "Inspect the repository, make a brief plan, implement the most "
+                    "promising change, and clean up so the workspace is runnable."
+                ),
+                f"The evaluation command is `{config.commands.agent_run}`.",
+                (
+                    "Do not write the final experiment summary yet. The harness will run "
+                    "the evaluation command after you finish this step."
+                ),
+            ]
+            if part
+        )
+
+    def build_setup_prompt(self, template: str) -> str:
+        return "\n\n".join(
+            part
+            for part in [
+                template,
+                (
+                    "Prepare this repository for easy-autoresearch. Create or adjust a "
+                    "clear runnable entry point for the project and ensure it prints at "
+                    "least one metric that can be parsed from stdout."
+                ),
+                (
+                    "Update autoresearch.yaml so commands.agent_run and "
+                    "commands.agent_metric_pattern match the prepared repo command."
+                ),
+                (
+                    "If helpful, also adjust commands.baseline and supporting project "
+                    "files so the generated setup is coherent for later review."
+                ),
+            ]
+            if part
+        )
+
+    def build_summary_prompt(self, result: CommandResult | None) -> str:
+        return "\n\n".join(
+            [
+                "Summarize this experiment in plain text under the headings "
+                "Hypothesis, Approach, Findings.",
+                f"Evaluation status: {result.status if result else 'not run'}",
+                f"Metric: {result.metric_value if result else 'n/a'}",
+                f"Stdout:\n{result.stdout if result else ''}",
+                f"Stderr:\n{result.stderr if result else ''}",
+            ]
+        )
+
+    def build_fallback_summary(self, result: CommandResult | None) -> str:
+        return "\n".join(
+            [
+                "Hypothesis",
+                "No agent summary was captured.",
+                "",
+                "Approach",
+                "The harness executed the configured experiment flow.",
+                "",
+                "Findings",
+                (
+                    f"Status: {result.status}, metric: {result.metric_value}"
+                    if result is not None
+                    else "No evaluation command completed."
+                ),
+            ]
+        )
+
+    def load_prompt_template(self) -> str:
+        prompt_path = self.repo_path / self.require_config().agent.prompt_template
+        return prompt_path.read_text(encoding="utf-8").strip()
 
     def require_config(self) -> AutoResearchConfig:
         if self.config is None:
             raise RuntimeError("AutoResearch config has not been loaded")
         return self.config
+
+    def validate_config(self) -> None:
+        config = self.require_config()
+        if config.experiments.max_experiments > 0:
+            if not config.commands.agent_run:
+                raise ValueError(
+                    "commands.agent_run must be configured for agent experiments"
+                )
+            if not config.commands.agent_metric_pattern:
+                raise ValueError(
+                    "commands.agent_metric_pattern must be configured for agent experiments"
+                )
 
 
 def parse_metric(output: str, pattern: str | None) -> float | None:
@@ -281,15 +582,52 @@ def build_parser() -> argparse.ArgumentParser:
 
 def prompt_for_existing_setup(repo_path: Path) -> bool:
     while True:
-        response = input(
-            f"Existing easy-autoresearch setup found in {repo_path}. "
-            "Continue with it or overwrite it? [c/o]: "
-        ).strip().lower()
+        response = (
+            input(
+                f"Existing easy-autoresearch setup found in {repo_path}. "
+                "Continue with it or overwrite it? [c/o]: "
+            )
+            .strip()
+            .lower()
+        )
         if response in {"c", "continue"}:
             return False
         if response in {"o", "overwrite"}:
             return True
         print("Enter 'c' to continue or 'o' to overwrite.")
+
+
+def prompt_for_config_review(config_file: Path) -> bool:
+    while True:
+        response = (
+            input(
+                f"Review and modify {config_file} if needed before repo setup continues. "
+                "Continue with setup? [y/n]: "
+            )
+            .strip()
+            .lower()
+        )
+        if response in {"y", "yes"}:
+            return True
+        if response in {"n", "no"}:
+            return False
+        print("Enter 'y' to continue setup or 'n' to stop.")
+
+
+def prompt_for_setup_review(repo_path: Path) -> bool:
+    while True:
+        response = (
+            input(
+                f"Review the setup changes in {repo_path}. Start autoresearch now? [y/n]: "
+            )
+            .strip()
+            .lower()
+        )
+        if response in {"y", "yes"}:
+            return True
+        if response in {"n", "no"}:
+            return False
+        print("Enter 'y' to start or 'n' to stop.")
 
 
 def main(argv: list[str] | None = None) -> int:
