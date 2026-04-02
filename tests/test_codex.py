@@ -42,6 +42,31 @@ def test_run_codex_invokes_cli_and_writes_logs(
     assert observed["kwargs"]["check"] is False
 
 
+def test_run_codex_passes_model_flag_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        observed["args"] = args
+        kwargs["stdout"].write('{"text":"hello"}\n')
+        kwargs["stderr"].write("")
+
+        class CompletedProcess:
+            returncode = 0
+
+        return CompletedProcess()
+
+    monkeypatch.setattr("easy_autoresearch.codex.subprocess.run", fake_run)
+    logs_dir(tmp_path).mkdir(parents=True)
+
+    run_codex("your prompt", repo_path=tmp_path, model="gpt-5.4")
+
+    assert observed["args"] == (
+        ["codex", "exec", "--json", "-m", "gpt-5.4", "your prompt"],
+    )
+
+
 def test_codex_reuses_session_id_across_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

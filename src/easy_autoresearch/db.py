@@ -51,6 +51,24 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at TEXT,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS agent_steps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+    run_index INTEGER NOT NULL,
+    phase TEXT NOT NULL,
+    agent_session_id TEXT,
+    status TEXT NOT NULL,
+    exit_code INTEGER,
+    prompt TEXT NOT NULL,
+    response_text TEXT NOT NULL,
+    stderr TEXT NOT NULL,
+    log_path TEXT,
+    stderr_path TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -258,5 +276,71 @@ def finish_run(
             log_path,
             finished_at,
             run_id,
+        ),
+    )
+
+
+def create_agent_step(
+    connection: sqlite3.Connection,
+    *,
+    experiment_id: int,
+    run_index: int,
+    phase: str,
+    prompt: str,
+    status: str,
+    started_at: str,
+    created_at: str,
+) -> int:
+    return insert_row(
+        connection,
+        """
+        INSERT INTO agent_steps (
+            experiment_id, run_index, phase, prompt, status, response_text, stderr,
+            started_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, '', '', ?, ?)
+        """,
+        (
+            experiment_id,
+            run_index,
+            phase,
+            prompt,
+            status,
+            started_at,
+            created_at,
+        ),
+    )
+
+
+def finish_agent_step(
+    connection: sqlite3.Connection,
+    *,
+    step_id: int,
+    status: str,
+    exit_code: int | None,
+    agent_session_id: str | None,
+    response_text: str,
+    stderr: str,
+    log_path: str | None,
+    stderr_path: str | None,
+    finished_at: str,
+) -> None:
+    execute(
+        connection,
+        """
+        UPDATE agent_steps
+        SET status = ?, exit_code = ?, agent_session_id = ?, response_text = ?,
+            stderr = ?, log_path = ?, stderr_path = ?, finished_at = ?
+        WHERE id = ?
+        """,
+        (
+            status,
+            exit_code,
+            agent_session_id,
+            response_text,
+            stderr,
+            log_path,
+            stderr_path,
+            finished_at,
+            step_id,
         ),
     )

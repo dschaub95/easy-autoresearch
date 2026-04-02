@@ -41,6 +41,15 @@ def _text_parts(value: Any) -> list[str]:
 
 
 class Codex(CodingAgent):
+    def __init__(
+        self,
+        repo_path: Path,
+        session_id: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        super().__init__(repo_path, session_id=session_id)
+        self.model = model
+
     def run(
         self,
         prompt: str,
@@ -52,6 +61,8 @@ class Codex(CodingAgent):
         output_path = output_path or logs_dir(self.repo_path) / "run.jsonl"
         stderr_path = stderr_path or logs_dir(self.repo_path) / "run.stderr.log"
         command = ["codex", "exec", "--json"]
+        if self.model:
+            command.extend(["-m", self.model])
         command += ["resume", self.session_id, prompt] if self.session_id else [prompt]
         with (
             output_path.open("w", encoding="utf-8") as stdout_handle,
@@ -87,11 +98,12 @@ def run_codex(
     prompt: str,
     *,
     repo_path: Path,
+    model: str | None = None,
     output_path: Path | None = None,
     stderr_path: Path | None = None,
     timeout_seconds: int | None = None,
 ) -> AgentRunResult:
-    return Codex(repo_path).run(
+    return Codex(repo_path, model=model).run(
         prompt,
         output_path=output_path,
         stderr_path=stderr_path,

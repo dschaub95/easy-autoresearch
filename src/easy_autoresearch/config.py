@@ -24,8 +24,9 @@ Current phase:
 
 Expected future responsibilities:
 - inspect repository state
-- propose an experiment
-- execute the experiment loop
+- plan an experiment step
+- execute the experiment step
+- resolve likely issues before evaluation
 - record results back through the orchestrator
 """
 
@@ -78,6 +79,7 @@ class ExperimentsConfig:
 @dataclass(slots=True)
 class AgentConfig:
     provider: str = "codex"
+    model: str | None = None
     prompt_template: str = ".autoresearch/prompts/codex-system.md"
 
 
@@ -105,6 +107,11 @@ class AutoResearchConfig:
                     "prompt_template", AgentConfig().prompt_template
                 ),
             }
+        elif codex_data := data.get("codex") or {}:
+            if "prompt_template" not in agent_data and codex_data.get(
+                "prompt_template"
+            ):
+                agent_data["prompt_template"] = codex_data["prompt_template"]
         return cls(
             project=ProjectConfig(**project_data),
             commands=CommandsConfig(**commands_data),

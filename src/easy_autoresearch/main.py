@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from .agent import CodingAgent
 from .codex import Codex
@@ -26,9 +27,11 @@ from .config import (
 )
 from .db import (
     connect,
+    create_agent_step,
     create_experiment,
     create_run,
     create_session,
+    finish_agent_step,
     finish_run,
     finish_session,
     initialize_database,
@@ -50,10 +53,26 @@ class CommandResult:
     metric_value: float | None
 
 
+AgentPhase = Literal["planning", "execution", "issue_resolution"]
+
+
+@dataclass(slots=True)
+class AgentPhaseResult:
+    phase: AgentPhase
+    prompt: str
+    status: str
+    exit_code: int | None
+    log_path: Path
+    stderr_path: Path
+    response_text: str
+    stderr: str
+    agent_session_id: str | None
+
+
 def create_agent(config: AutoResearchConfig, repo_path: Path) -> CodingAgent:
     if config.agent.provider != "codex":
         raise ValueError(f"Unsupported agent provider: {config.agent.provider}")
-    return Codex(repo_path)
+    return Codex(repo_path, model=config.agent.model)
 
 
 class AutoResearch:
@@ -318,30 +337,52 @@ class AutoResearch:
                 started_at=run_started_at,
                 created_at=run_started_at,
             )
-            last_agent_log_path = (
-                self.logs_dir
-                / f"experiment-{experiment_index}-run-{run_index}.agent.jsonl"
+            phase_results = self.run_agent_phases(
+                connection,
+                agent=agent,
+                template=template,
+                experiment_id=experiment_id,
+                experiment_index=experiment_index,
+                run_index=run_index,
             )
-            last_agent_stderr_path = (
-                self.logs_dir
-                / f"experiment-{experiment_index}-run-{run_index}.agent.stderr.log"
-            )
-            agent_result = agent.run(
-                self.build_agent_prompt(template, experiment_index, run_index),
-                output_path=last_agent_log_path,
-                stderr_path=last_agent_stderr_path,
-                timeout_seconds=config.session.max_duration_seconds,
-            )
-            if agent_result.exit_code != 0:
+            if phase_results:
+                last_agent_log_path = phase_results[-1].log_path
+                last_agent_stderr_path = phase_results[-1].stderr_path
+            if not phase_results or any(
+                phase_result.status != "completed" for phase_result in phase_results
+            ):
                 finish_run(
                     connection,
                     run_id=run_id,
                     status="failed",
-                    exit_code=agent_result.exit_code,
-                    stdout=agent_result.text,
-                    stderr=agent_result.stderr,
+                    exit_code=(
+                        next(
+                            (
+                                phase_result.exit_code
+                                for phase_result in phase_results
+                                if phase_result.status != "completed"
+                            ),
+                            1,
+                        )
+                        if phase_results
+                        else 1
+                    ),
+                    stdout="\n\n".join(
+                        phase_result.response_text
+                        for phase_result in phase_results
+                        if phase_result.response_text
+                    ),
+                    stderr="\n\n".join(
+                        phase_result.stderr
+                        for phase_result in phase_results
+                        if phase_result.stderr
+                    ),
                     metric_value=None,
-                    log_path=str(last_agent_log_path.relative_to(self.repo_path)),
+                    log_path=(
+                        str(last_agent_log_path.relative_to(self.repo_path))
+                        if last_agent_log_path is not None
+                        else None
+                    ),
                     finished_at=utc_now(),
                 )
                 continue
@@ -424,23 +465,109 @@ class AutoResearch:
         )
         return experiment_status, best_metric, run_count
 
-    def build_agent_prompt(
-        self, template: str, experiment_index: int, run_index: int
+    def run_agent_phases(
+        self,
+        connection,
+        *,
+        agent: CodingAgent,
+        template: str,
+        experiment_id: int,
+        experiment_index: int,
+        run_index: int,
+    ) -> list[AgentPhaseResult]:
+        config = self.require_config()
+        phase_results: list[AgentPhaseResult] = []
+        for phase in ("planning", "execution", "issue_resolution"):
+            prompt = self.build_agent_phase_prompt(
+                template, experiment_index, run_index, phase
+            )
+            started_at = utc_now()
+            step_id = create_agent_step(
+                connection,
+                experiment_id=experiment_id,
+                run_index=run_index,
+                phase=phase,
+                prompt=prompt,
+                status="running",
+                started_at=started_at,
+                created_at=started_at,
+            )
+            output_path = (
+                self.logs_dir
+                / f"experiment-{experiment_index}-run-{run_index}.{phase}.agent.jsonl"
+            )
+            stderr_path = (
+                self.logs_dir
+                / f"experiment-{experiment_index}-run-{run_index}.{phase}.agent.stderr.log"
+            )
+            result = agent.run(
+                prompt,
+                output_path=output_path,
+                stderr_path=stderr_path,
+                timeout_seconds=config.session.max_duration_seconds,
+            )
+            status = "completed" if result.exit_code == 0 else "failed"
+            phase_result = AgentPhaseResult(
+                phase=phase,
+                prompt=prompt,
+                status=status,
+                exit_code=result.exit_code,
+                log_path=output_path,
+                stderr_path=stderr_path,
+                response_text=result.text,
+                stderr=result.stderr,
+                agent_session_id=result.session_id,
+            )
+            finish_agent_step(
+                connection,
+                step_id=step_id,
+                status=status,
+                exit_code=result.exit_code,
+                agent_session_id=result.session_id,
+                response_text=result.text,
+                stderr=result.stderr,
+                log_path=str(output_path.relative_to(self.repo_path)),
+                stderr_path=str(stderr_path.relative_to(self.repo_path)),
+                finished_at=utc_now(),
+            )
+            phase_results.append(phase_result)
+            if status != "completed":
+                break
+        return phase_results
+
+    def build_agent_phase_prompt(
+        self,
+        template: str,
+        experiment_index: int,
+        run_index: int,
+        phase: AgentPhase,
     ) -> str:
         config = self.require_config()
+        phase_instructions = {
+            "planning": (
+                "Inspect the repository and produce a concise implementation plan for "
+                "the most promising change to make this experiment a success. Do not edit files yet."
+            ),
+            "execution": (
+                "Implement the planned change in this same session. Leave the "
+                "workspace runnable, but do not run the final evaluation command."
+            ),
+            "issue_resolution": (
+                "Review the changes for likely issues, fix anything necessary, and "
+                "leave the workspace ready for evaluation. Do not run the final "
+                "evaluation command."
+            ),
+        }
         return "\n\n".join(
             part
             for part in [
                 template,
-                (
-                    f"Experiment {experiment_index}, attempt {run_index}. "
-                    "Inspect the repository, make a brief plan, implement the most "
-                    "promising change, and clean up so the workspace is runnable."
-                ),
+                f"Experiment {experiment_index}, attempt {run_index}, phase: {phase}.",
+                phase_instructions[phase],
                 f"The evaluation command is `{config.commands.agent_run}`.",
                 (
                     "Do not write the final experiment summary yet. The harness will run "
-                    "the evaluation command after you finish this step."
+                    "the evaluation command only after all three phases succeed."
                 ),
             ]
             if part

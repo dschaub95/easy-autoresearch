@@ -101,6 +101,7 @@ def test_run_scaffolds_and_starts_session(
     assert config["project"]["name"] == "target-repo"
     assert config["commands"]["baseline"] == "uv run pytest"
     assert config["commands"]["agent_run"] == "uv run pytest"
+    assert config["agent"]["model"] is None
     assert config["agent"]["prompt_template"] == ".autoresearch/prompts/codex-system.md"
 
     with sqlite3.connect(db_path(repo_path)) as connection:
@@ -217,7 +218,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             self.calls += 1
             text = (
                 "Hypothesis\nImprove the metric.\n\nApproach\nMake a change.\n\nFindings\nMetric improved."
-                if self.calls == 2
+                if self.calls == 4
                 else "working"
             )
             kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
@@ -251,6 +252,10 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             "SELECT kind, status, best_metric, agent_provider, agent_session_id, summary_path "
             "FROM experiments ORDER BY id"
         ).fetchall()
+        agent_steps = connection.execute(
+            "SELECT run_index, phase, status, agent_session_id, prompt, response_text, log_path, stderr_path "
+            "FROM agent_steps ORDER BY id"
+        ).fetchall()
         runs = connection.execute(
             "SELECT status, exit_code, metric_value, log_path FROM runs ORDER BY id"
         ).fetchall()
@@ -274,9 +279,121 @@ def test_run_uses_coding_agent_for_candidate_experiments(
         ("failed", 1, 2.0, ".autoresearch/experiment-1-run-2.log"),
         ("completed", 0, 3.0, ".autoresearch/experiment-1-run-1.log"),
     ]
+    assert [row[:4] for row in agent_steps] == [
+        (1, "planning", "completed", "sess-123"),
+        (1, "execution", "completed", "sess-123"),
+        (1, "issue_resolution", "completed", "sess-123"),
+    ]
+    assert all("Experiment 1, attempt 1, phase:" in row[4] for row in agent_steps)
+    assert all(row[5] == "working" for row in agent_steps)
+    assert agent_steps[0][6].endswith("experiment-1-run-1.planning.agent.jsonl")
+    assert agent_steps[1][6].endswith("experiment-1-run-1.execution.agent.jsonl")
+    assert agent_steps[2][6].endswith("experiment-1-run-1.issue_resolution.agent.jsonl")
     assert "Hypothesis" in (
         repo_path / ".autoresearch" / "logs" / "experiment-1-summary.md"
     ).read_text(encoding="utf-8")
+    assert fake_agent.calls == 4
+
+
+def test_run_skips_repo_command_when_agent_phase_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path = tmp_path / "project"
+    baseline_results = command_results(
+        CommandResult(
+            command="baseline",
+            exit_code=1,
+            stdout="metric: 1.0\n",
+            stderr="",
+            status="failed",
+            metric_value=1.0,
+        )
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(baseline_results),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    responses = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    main([str(repo_path)])
+    write_config_updates(
+        repo_path,
+        baseline="python -c \"print('metric: 1.0')\"",
+        metric_pattern=r"^metric:\s+([\d.]+)",
+        agent_run="python -c \"print('metric: 3.0')\"",
+        agent_metric_pattern=r"^metric:\s+([\d.]+)",
+        max_experiments=1,
+        max_runs_per_experiment=1,
+    )
+
+    evaluation_calls: list[str] = []
+
+    def fake_run_command(*args, **kwargs) -> CommandResult:
+        evaluation_calls.append(args[0])
+        if args[0] == "python -c \"print('metric: 3.0')\"":
+            raise AssertionError(
+                "repo command should not run when an agent phase fails"
+            )
+        return CommandResult(
+            command=args[0],
+            exit_code=1,
+            stdout="metric: 1.0\n",
+            stderr="",
+            status="failed",
+            metric_value=1.0,
+        )
+
+    class FailingAgent:
+        def __init__(self) -> None:
+            self.session_id = "sess-456"
+            self.calls = 0
+
+        def run(self, prompt: str, **kwargs) -> AgentRunResult:
+            self.calls += 1
+            exit_code = 0 if self.calls == 1 else 1
+            text = "plan" if self.calls == 1 else "execution failed"
+            kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
+            kwargs["stderr_path"].write_text(
+                "boom\n" if exit_code else "", encoding="utf-8"
+            )
+            return AgentRunResult(
+                exit_code=exit_code,
+                output_path=kwargs["output_path"],
+                stderr_path=kwargs["stderr_path"],
+                session_id=self.session_id,
+                text=text,
+                stderr="boom\n" if exit_code else "",
+            )
+
+    failing_agent = FailingAgent()
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent", lambda config, repo_path: failing_agent
+    )
+    monkeypatch.setattr("easy_autoresearch.main.run_command", fake_run_command)
+    responses = iter(["c", "y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+
+    exit_code = main([str(repo_path)])
+
+    assert exit_code == 1
+    assert evaluation_calls == ["python -c \"print('metric: 1.0')\""]
+    with sqlite3.connect(db_path(repo_path)) as connection:
+        agent_steps = connection.execute(
+            "SELECT phase, status, exit_code, response_text, stderr FROM agent_steps ORDER BY id"
+        ).fetchall()
+        runs = connection.execute(
+            "SELECT status, exit_code, metric_value FROM runs ORDER BY id"
+        ).fetchall()
+
+    assert agent_steps == [
+        ("planning", "completed", 0, "plan", ""),
+        ("execution", "failed", 1, "execution failed", "boom\n"),
+    ]
+    assert runs[-1] == ("failed", 1, None)
 
 
 def test_run_overwrites_existing_setup(

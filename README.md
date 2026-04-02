@@ -6,8 +6,10 @@ Current scope:
 
 - scaffold a target repository with local config, prompts, and SQLite state
 - run a session loop that records `sessions`, `experiments`, and `runs`
+- record per-run agent conversation steps in SQLite
 - retry across multiple experiments and runs according to config limits
-- keep the Codex integration boundary explicit, but still stubbed
+- run candidate experiments through planning, execution, and issue-resolution
+  agent phases before evaluation
 
 This is intentionally pre-AI scaffolding. The loop runs configured subprocesses
 and stores the outputs, but it does not yet ask Codex to propose code changes.
@@ -40,6 +42,8 @@ Starting a session:
 - opens one `sessions` row
 - runs up to `experiments.max_experiments`
 - runs up to `experiments.max_runs_per_experiment` within each experiment
+- for candidate experiments, runs three consecutive agent calls in the same session
+  before executing `commands.agent_run`
 - stores each run's output and metric in SQLite
 - stops early when an experiment completes successfully
 
@@ -52,17 +56,22 @@ project:
 commands:
   baseline: uv run pytest
   metric_pattern: null
+  agent_run: uv run pytest
+  agent_metric_pattern: null
 session:
   max_duration_seconds: 3600
 experiments:
   max_experiments: 1
   max_runs_per_experiment: 1
-codex:
-  command: codex
+agent:
+  provider: codex
+  model: null
   prompt_template: .autoresearch/prompts/codex-system.md
 editable_paths: []
 readonly_paths: []
 ```
+
+Set `agent.model` to pass a specific Codex model via `codex exec -m <MODEL>`.
 
 ## Development
 
