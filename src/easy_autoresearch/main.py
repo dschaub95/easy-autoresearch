@@ -265,13 +265,13 @@ class AutoResearch:
                 connection,
                 experiment_id=experiment_id,
                 run_index=run_index,
-                command=config.commands.baseline,
+                command=config.commands.run,
                 status="running",
                 started_at=run_started_at,
                 created_at=run_started_at,
             )
             result = run_command(
-                config.commands.baseline,
+                config.commands.run,
                 cwd=self.repo_path,
                 timeout_seconds=config.session.max_duration_seconds,
                 metric_pattern=config.commands.metric_pattern,
@@ -332,7 +332,7 @@ class AutoResearch:
                 connection,
                 experiment_id=experiment_id,
                 run_index=run_index,
-                command=config.commands.agent_run,
+                command=config.commands.run,
                 status="running",
                 started_at=run_started_at,
                 created_at=run_started_at,
@@ -388,10 +388,10 @@ class AutoResearch:
                 continue
 
             result = run_command(
-                config.commands.agent_run,
+                config.commands.run,
                 cwd=self.repo_path,
                 timeout_seconds=config.session.max_duration_seconds,
-                metric_pattern=config.commands.agent_metric_pattern,
+                metric_pattern=config.commands.metric_pattern,
             )
             if result.metric_value is None:
                 result = CommandResult(
@@ -400,7 +400,7 @@ class AutoResearch:
                     stdout=result.stdout,
                     stderr=(
                         f"{result.stderr}\nNo metric matched pattern "
-                        f"{config.commands.agent_metric_pattern!r}."
+                        f"{config.commands.metric_pattern!r}."
                     ).strip(),
                     status="failed",
                     metric_value=None,
@@ -549,8 +549,10 @@ class AutoResearch:
                 "the most promising change to make this experiment a success. Do not edit files yet."
             ),
             "execution": (
-                "Implement the planned change in this same session. Leave the "
-                "workspace runnable, but do not run the final evaluation command."
+                "Implement the planned change in this same session. Make concrete "
+                "modifications to repository files so the workspace reflects the "
+                "experiment before evaluation. Leave the workspace runnable, but do "
+                "not run the final evaluation command."
             ),
             "issue_resolution": (
                 "Review the changes for likely issues, fix anything necessary, and "
@@ -564,7 +566,7 @@ class AutoResearch:
                 template,
                 f"Experiment {experiment_index}, attempt {run_index}, phase: {phase}.",
                 phase_instructions[phase],
-                f"The evaluation command is `{config.commands.agent_run}`.",
+                f"The evaluation command is `{config.commands.run}`.",
                 (
                     "Do not write the final experiment summary yet. The harness will run "
                     "the evaluation command only after all three phases succeed."
@@ -584,12 +586,8 @@ class AutoResearch:
                     "least one metric that can be parsed from stdout."
                 ),
                 (
-                    "Update autoresearch.yaml so commands.agent_run and "
-                    "commands.agent_metric_pattern match the prepared repo command."
-                ),
-                (
-                    "If helpful, also adjust commands.baseline and supporting project "
-                    "files so the generated setup is coherent for later review."
+                    "Update autoresearch.yaml so commands.run and "
+                    "commands.metric_pattern match the prepared repo command."
                 ),
             ]
             if part
@@ -637,13 +635,11 @@ class AutoResearch:
     def validate_config(self) -> None:
         config = self.require_config()
         if config.experiments.max_experiments > 0:
-            if not config.commands.agent_run:
+            if not config.commands.run:
+                raise ValueError("commands.run must be configured")
+            if not config.commands.metric_pattern:
                 raise ValueError(
-                    "commands.agent_run must be configured for agent experiments"
-                )
-            if not config.commands.agent_metric_pattern:
-                raise ValueError(
-                    "commands.agent_metric_pattern must be configured for agent experiments"
+                    "commands.metric_pattern must be configured for agent experiments"
                 )
 
 

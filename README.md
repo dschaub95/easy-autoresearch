@@ -43,7 +43,7 @@ Starting a session:
 - runs up to `experiments.max_experiments`
 - runs up to `experiments.max_runs_per_experiment` within each experiment
 - for candidate experiments, runs three consecutive agent calls in the same session
-  before executing `commands.agent_run`
+  before executing the shared `commands.run`
 - stores each run's output and metric in SQLite
 - stops early when an experiment completes successfully
 
@@ -54,10 +54,8 @@ project:
   repo_path: /absolute/path/to/repo
   name: my-repo
 commands:
-  baseline: uv run pytest
+  run: uv run pytest
   metric_pattern: null
-  agent_run: uv run pytest
-  agent_metric_pattern: null
 session:
   max_duration_seconds: 3600
 experiments:

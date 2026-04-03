@@ -59,10 +59,8 @@ class ProjectConfig:
 
 @dataclass(slots=True)
 class CommandsConfig:
-    baseline: str = "uv run pytest"
+    run: str = "uv run pytest"
     metric_pattern: str | None = None
-    agent_run: str = "uv run pytest"
-    agent_metric_pattern: str | None = None
 
 
 @dataclass(slots=True)

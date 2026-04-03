@@ -20,23 +20,17 @@ from easy_autoresearch.main import CommandResult, main
 def write_config_updates(
     repo_path: Path,
     *,
-    baseline: str | None = None,
+    run: str | None = None,
     metric_pattern: str | None = None,
-    agent_run: str | None = None,
-    agent_metric_pattern: str | None = None,
     max_experiments: int | None = None,
     max_runs_per_experiment: int | None = None,
 ) -> None:
     config_file = repo_path / CONFIG_FILENAME
     config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    if baseline is not None:
-        config["commands"]["baseline"] = baseline
+    if run is not None:
+        config["commands"]["run"] = run
     if metric_pattern is not None:
         config["commands"]["metric_pattern"] = metric_pattern
-    if agent_run is not None:
-        config["commands"]["agent_run"] = agent_run
-    if agent_metric_pattern is not None:
-        config["commands"]["agent_metric_pattern"] = agent_metric_pattern
     if max_experiments is not None:
         config["experiments"]["max_experiments"] = max_experiments
     if max_runs_per_experiment is not None:
@@ -99,8 +93,7 @@ def test_run_scaffolds_and_starts_session(
 
     config = yaml.safe_load((repo_path / CONFIG_FILENAME).read_text(encoding="utf-8"))
     assert config["project"]["name"] == "target-repo"
-    assert config["commands"]["baseline"] == "uv run pytest"
-    assert config["commands"]["agent_run"] == "uv run pytest"
+    assert config["commands"]["run"] == "uv run pytest"
     assert config["agent"]["model"] is None
     assert config["agent"]["prompt_template"] == ".autoresearch/prompts/codex-system.md"
 
@@ -172,17 +165,15 @@ def test_run_uses_coding_agent_for_candidate_experiments(
     main([str(repo_path)])
     write_config_updates(
         repo_path,
-        baseline="python -c \"print('metric: 2.0')\"",
+        run="python -c \"print('metric: 3.0')\"",
         metric_pattern=r"^metric:\s+([\d.]+)",
-        agent_run="python -c \"print('metric: 3.0')\"",
-        agent_metric_pattern=r"^metric:\s+([\d.]+)",
         max_experiments=2,
         max_runs_per_experiment=2,
     )
 
     evaluation_results = command_results(
         CommandResult(
-            command="baseline",
+            command="run",
             exit_code=1,
             stdout="metric: 1.0\n",
             stderr="",
@@ -190,7 +181,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             metric_value=1.0,
         ),
         CommandResult(
-            command="baseline",
+            command="run",
             exit_code=1,
             stdout="metric: 2.0\n",
             stderr="",
@@ -198,7 +189,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             metric_value=2.0,
         ),
         CommandResult(
-            command="agent_run",
+            command="run",
             exit_code=0,
             stdout="metric: 3.0\n",
             stderr="",
@@ -322,10 +313,8 @@ def test_run_skips_repo_command_when_agent_phase_fails(
     main([str(repo_path)])
     write_config_updates(
         repo_path,
-        baseline="python -c \"print('metric: 1.0')\"",
+        run="python -c \"print('metric: 1.0')\"",
         metric_pattern=r"^metric:\s+([\d.]+)",
-        agent_run="python -c \"print('metric: 3.0')\"",
-        agent_metric_pattern=r"^metric:\s+([\d.]+)",
         max_experiments=1,
         max_runs_per_experiment=1,
     )
@@ -334,10 +323,6 @@ def test_run_skips_repo_command_when_agent_phase_fails(
 
     def fake_run_command(*args, **kwargs) -> CommandResult:
         evaluation_calls.append(args[0])
-        if args[0] == "python -c \"print('metric: 3.0')\"":
-            raise AssertionError(
-                "repo command should not run when an agent phase fails"
-            )
         return CommandResult(
             command=args[0],
             exit_code=1,
@@ -433,7 +418,7 @@ def test_run_overwrites_existing_setup(
     stale_log.write_text("stale", encoding="utf-8")
     write_config_updates(
         repo_path,
-        baseline="python -c \"print('metric: 7.0')\"",
+        run="python -c \"print('metric: 7.0')\"",
         metric_pattern=r"^metric:\s+([\d.]+)",
     )
 
@@ -442,7 +427,7 @@ def test_run_overwrites_existing_setup(
     assert exit_code == 0
     assert not stale_log.exists()
     config = yaml.safe_load((repo_path / CONFIG_FILENAME).read_text(encoding="utf-8"))
-    assert config["commands"]["baseline"] == "uv run pytest"
+    assert config["commands"]["run"] == "uv run pytest"
 
 
 def test_main_defaults_to_current_directory(
