@@ -13,6 +13,7 @@ STATE_DIRNAME = ".autoresearch"
 DB_FILENAME = "state.db"
 PROMPTS_DIRNAME = "prompts"
 LOGS_DIRNAME = "logs"
+DASHBOARD_STATE_FILENAME = "dashboard.json"
 DEFAULT_BASELINE_LOG = "baseline.log"
 CODEX_SYSTEM_PROMPT = """# Codex System Prompt
 
@@ -51,6 +52,10 @@ def logs_dir(repo_path: Path) -> Path:
     return state_dir(repo_path) / LOGS_DIRNAME
 
 
+def dashboard_state_path(repo_path: Path) -> Path:
+    return state_dir(repo_path) / DASHBOARD_STATE_FILENAME
+
+
 @dataclass(slots=True)
 class ProjectConfig:
     repo_path: str
@@ -70,14 +75,15 @@ class SessionConfig:
 
 @dataclass(slots=True)
 class ExperimentsConfig:
-    max_experiments: int = 0
+    max_experiments: int = 1
     max_runs_per_experiment: int = 1
 
 
 @dataclass(slots=True)
 class AgentConfig:
     provider: str = "codex"
-    model: str | None = None
+    model: str | None = "gpt-5.4-mini"
+    sandbox_mode: str = "workspace-write"
     prompt_template: str = ".autoresearch/prompts/codex-system.md"
 
 

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any
 
 from .agent import AgentRunResult, CodingAgent
@@ -46,9 +49,13 @@ class Codex(CodingAgent):
         repo_path: Path,
         session_id: str | None = None,
         model: str | None = None,
+        sandbox_mode: str = "workspace-write",
+        stream_output: bool = False,
     ) -> None:
         super().__init__(repo_path, session_id=session_id)
         self.model = model
+        self.sandbox_mode = sandbox_mode
+        self.stream_output = stream_output
 
     def run(
         self,
@@ -60,37 +67,124 @@ class Codex(CodingAgent):
     ) -> AgentRunResult:
         output_path = output_path or logs_dir(self.repo_path) / "run.jsonl"
         stderr_path = stderr_path or logs_dir(self.repo_path) / "run.stderr.log"
-        command = ["codex", "exec", "--json"]
+        repo = str(self.repo_path.resolve())
+        command = [
+            "codex",
+            "exec",
+            "--json",
+            "-s",
+            self.sandbox_mode,
+            "-C",
+            repo,
+        ]
         if self.model:
             command.extend(["-m", self.model])
         command += ["resume", self.session_id, prompt] if self.session_id else [prompt]
+        text_parts: list[str] = []
+        stderr_parts: list[str] = []
+        queue: Queue[tuple[str, str]] = Queue()
+        stdout_done = threading.Event()
+        stderr_done = threading.Event()
+
         with (
             output_path.open("w", encoding="utf-8") as stdout_handle,
             stderr_path.open("w", encoding="utf-8") as stderr_handle,
         ):
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
-                cwd=str(self.repo_path),
+                cwd=repo,
                 text=True,
-                stdout=stdout_handle,
-                stderr=stderr_handle,
-                timeout=timeout_seconds,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-        text_parts: list[str] = []
-        for line in output_path.read_text(encoding="utf-8").splitlines():
-            if not line:
-                continue
-            payload = json.loads(line)
-            self.session_id = self.session_id or _session_id(payload)
-            text_parts.extend(_text_parts(payload))
+
+            def read_stdout() -> None:
+                stream = process.stdout
+                if stream is None:
+                    return
+                try:
+                    for line in iter(stream.readline, ""):
+                        stdout_handle.write(line)
+                        stdout_handle.flush()
+                        queue.put(("stdout", line))
+                finally:
+                    stream.close()
+                    stdout_done.set()
+
+            def read_stderr() -> None:
+                stream = process.stderr
+                if stream is None:
+                    return
+                try:
+                    for line in iter(stream.readline, ""):
+                        stderr_handle.write(line)
+                        stderr_handle.flush()
+                        queue.put(("stderr", line))
+                finally:
+                    stream.close()
+                    stderr_done.set()
+
+            stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stdout_thread.start()
+            stderr_thread.start()
+
+            timed_out = False
+            deadline = time.monotonic() + timeout_seconds if timeout_seconds else None
+            while True:
+                try:
+                    stream_name, line = queue.get(timeout=0.1)
+                except Empty:
+                    stream_name = None
+                    line = ""
+                if stream_name is not None:
+                    if stream_name == "stderr":
+                        stderr_parts.append(line)
+                        if self.stream_output and line.strip():
+                            print(f"[codex stderr] {line.rstrip()}", flush=True)
+                    elif line.strip():
+                        payload = json.loads(line)
+                        self.session_id = self.session_id or _session_id(payload)
+                        line_text_parts = [
+                            part for part in _text_parts(payload) if part
+                        ]
+                        text_parts.extend(line_text_parts)
+                        if self.stream_output:
+                            for part in line_text_parts:
+                                print(f"[codex] {part}", flush=True)
+
+                process_done = process.poll() is not None
+                if (
+                    process_done
+                    and stdout_done.is_set()
+                    and stderr_done.is_set()
+                    and queue.empty()
+                ):
+                    break
+
+                if (
+                    deadline is not None
+                    and time.monotonic() >= deadline
+                    and not process_done
+                ):
+                    process.kill()
+                    timed_out = True
+                    break
+
+            if timed_out:
+                exit_code = process.wait()
+            else:
+                exit_code = process.wait()
+
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
         return AgentRunResult(
-            exit_code=completed.returncode,
+            exit_code=exit_code,
             output_path=output_path,
             stderr_path=stderr_path,
             session_id=self.session_id,
             text="\n".join(part for part in text_parts if part).strip(),
-            stderr=stderr_path.read_text(encoding="utf-8"),
+            stderr="".join(stderr_parts) or stderr_path.read_text(encoding="utf-8"),
         )
 
 
@@ -99,11 +193,12 @@ def run_codex(
     *,
     repo_path: Path,
     model: str | None = None,
+    sandbox_mode: str = "workspace-write",
     output_path: Path | None = None,
     stderr_path: Path | None = None,
     timeout_seconds: int | None = None,
 ) -> AgentRunResult:
-    return Codex(repo_path, model=model).run(
+    return Codex(repo_path, model=model, sandbox_mode=sandbox_mode).run(
         prompt,
         output_path=output_path,
         stderr_path=stderr_path,

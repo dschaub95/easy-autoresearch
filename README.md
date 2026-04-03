@@ -20,6 +20,9 @@ and stores the outputs, but it does not yet ask Codex to propose code changes.
 uvx easy-autoresearch
 uvx easy-autoresearch /path/to/repo
 uvx easy-autoresearch --overwrite /path/to/repo
+uvx easy-autoresearch --headless /path/to/repo
+uvx easy-autoresearch dashboard /path/to/repo
+uvx easy-autoresearch dashboard-stop /path/to/repo
 ```
 
 If no repo path is provided, easy-autoresearch uses the current working
@@ -30,6 +33,18 @@ On startup it checks for an existing setup:
 - if no setup exists, it scaffolds the repo and starts a session
 - if a setup exists, it prompts to continue or overwrite
 - `--overwrite` skips the prompt and recreates the setup automatically
+
+When the actual research loop starts, easy-autoresearch now also starts a local
+observability dashboard by default. Use `--headless` to disable the server.
+
+Dashboard commands:
+
+- `easy-autoresearch dashboard /path/to/repo` starts the local dashboard server
+  without starting a research session
+- `easy-autoresearch dashboard-stop /path/to/repo` stops a previously started
+  dashboard server for that repository
+- `dashboard` is non-mutating: it does not scaffold `autoresearch.yaml` or
+  `.autoresearch/state.db` for a pristine repository
 
 Scaffolding creates:
 
@@ -46,6 +61,7 @@ Starting a session:
   before executing the shared `commands.run`
 - stores each run's output and metric in SQLite
 - stops early when an experiment completes successfully
+- serves a local dashboard while the session is running
 
 ## Default Config Shape
 
@@ -63,7 +79,8 @@ experiments:
   max_runs_per_experiment: 1
 agent:
   provider: codex
-  model: null
+  model: gpt-5.4-mini
+  sandbox_mode: workspace-write
   prompt_template: .autoresearch/prompts/codex-system.md
 editable_paths: []
 readonly_paths: []

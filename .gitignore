@@ -22,3 +22,6 @@ htmlcov/
 # Project
 .references/
 .codex
+package.json
+package-lock.json
+node_modules/

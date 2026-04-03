@@ -6,12 +6,16 @@ import argparse
 import re
 import shutil
 import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Literal
 
 from .agent import CodingAgent
+from .app.server import DashboardServer
 from .codex import Codex
 from .config import (
     CODEX_SYSTEM_PROMPT,
@@ -25,7 +29,7 @@ from .config import (
     state_dir,
     write_config,
 )
-from .db import (
+from .storage import (
     connect,
     create_agent_step,
     create_experiment,
@@ -72,7 +76,12 @@ class AgentPhaseResult:
 def create_agent(config: AutoResearchConfig, repo_path: Path) -> CodingAgent:
     if config.agent.provider != "codex":
         raise ValueError(f"Unsupported agent provider: {config.agent.provider}")
-    return Codex(repo_path, model=config.agent.model)
+    return Codex(
+        repo_path,
+        model=config.agent.model,
+        sandbox_mode=config.agent.sandbox_mode,
+        stream_output=True,
+    )
 
 
 class AutoResearch:
@@ -82,6 +91,10 @@ class AutoResearch:
         self,
         repo_path: Path,
         config: AutoResearchConfig | None = None,
+        *,
+        headless: bool = False,
+        server_host: str = "127.0.0.1",
+        server_port: int = 8765,
     ) -> None:
         self.repo_path = repo_path.resolve()
         self.config = config
@@ -91,6 +104,11 @@ class AutoResearch:
         self.prompts_dir = prompts_dir(self.repo_path)
         self.database_path = db_path(self.repo_path)
         self.ready_to_start = True
+        self.headless = headless
+        self.server_host = server_host
+        self.server_port = server_port
+        self.dashboard_server: DashboardServer | None = None
+        self.did_scaffold = False
 
     def scaffold_repo(self) -> None:
         self.repo_path.mkdir(parents=True, exist_ok=True)
@@ -104,6 +122,7 @@ class AutoResearch:
             self.config = default_config_for_repo(self.repo_path)
             write_config(self.config, self.repo_path)
         initialize_database(self.database_path)
+        self.did_scaffold = True
 
     def has_existing_setup(self) -> bool:
         return self.config_file.exists()
@@ -115,7 +134,7 @@ class AutoResearch:
             shutil.rmtree(self.state_dir)
         self.config = None
 
-    def setup(self, *, overwrite: bool = False) -> None:
+    def resolve_setup_state(self, *, overwrite: bool = False) -> None:
         if self.has_existing_setup():
             if overwrite:
                 self.overwrite_setup()
@@ -133,23 +152,20 @@ class AutoResearch:
                     f"Continuing with existing easy-autoresearch setup in {self.repo_path}"
                 )
 
+    def scaffold_if_needed(self) -> None:
         if not self.has_existing_setup():
             self.scaffold_repo()
-            if not prompt_for_config_review(self.config_file):
-                print("Cancelled after scaffolding so you can adjust the config.")
-                self.ready_to_start = False
-                return
-            self.prepare_repo_setup()
-            if not prompt_for_setup_review(self.repo_path):
-                print("Cancelled after setup so you can review the changes.")
-                self.ready_to_start = False
-                return
-            print(f"Scaffolded easy-autoresearch files in {self.repo_path}")
-            print(f"Config: {self.config_file}")
         elif self.config is None:
             self.config = load_config(self.repo_path)
 
+    def review_scaffold_if_needed(self) -> None:
+        if self.did_scaffold and not prompt_for_config_review(self.config_file):
+            print("Cancelled after scaffolding so you can adjust the config.")
+            self.ready_to_start = False
+
     def prepare_repo_setup(self) -> None:
+        if not self.did_scaffold or not self.ready_to_start:
+            return
         template = self.load_prompt_template()
         result = create_agent(self.require_config(), self.repo_path).run(
             self.build_setup_prompt(template),
@@ -165,12 +181,40 @@ class AutoResearch:
             )
         self.config = load_config(self.repo_path)
 
-    def start(self) -> int:
-        config = self.require_config()
+    def review_prepared_setup_if_needed(self) -> None:
+        if (
+            self.did_scaffold
+            and self.ready_to_start
+            and not prompt_for_setup_review(self.repo_path)
+        ):
+            print("Cancelled after setup so you can review the changes.")
+            self.ready_to_start = False
+
+    def start_dashboard(self) -> None:
+        if self.headless or self.dashboard_server is not None:
+            return
+        self.dashboard_server = DashboardServer(
+            repo_path=self.repo_path,
+            host=self.server_host,
+            port=self.server_port,
+        )
+        self.dashboard_server.start()
+        if getattr(self.dashboard_server, "reused_existing", False):
+            print(f"Dashboard already running at {self.dashboard_server.url}")
+        else:
+            print(f"Dashboard available at {self.dashboard_server.url}")
+
+    def stop_dashboard(self) -> None:
+        if self.dashboard_server is not None:
+            self.dashboard_server.stop()
+            self.dashboard_server = None
+
+    def run_session(self) -> int:
         if not self.ready_to_start:
             return 0
+        config = self.require_config()
         self.validate_config()
-
+        print(f"Starting autoresearch in {self.repo_path}")
         started_at = utc_now()
         with connect(self.database_path) as connection:
             session_id = create_session(
@@ -181,10 +225,12 @@ class AutoResearch:
                 started_at=started_at,
                 created_at=started_at,
             )
+            print("Running baseline experiment")
 
             experiment_count = 0
             total_run_count = 0
             session_status = "failed"
+
             baseline_started_at = utc_now()
             baseline_experiment_id = create_experiment(
                 connection,
@@ -223,6 +269,7 @@ class AutoResearch:
                     created_at=experiment_started_at,
                     updated_at=experiment_started_at,
                 )
+                print(f"Running candidate experiment {experiment_index}")
                 experiment_status, _, run_count = self.run_agent_experiment(
                     connection,
                     experiment_id=experiment_id,
@@ -239,7 +286,6 @@ class AutoResearch:
                 status=session_status,
                 finished_at=utc_now(),
             )
-
         print(
             "Started session "
             f"{session_id} with 1 baseline run and {experiment_count} experiment(s) "
@@ -260,6 +306,9 @@ class AutoResearch:
         run_count = 0
         for run_index in range(1, config.experiments.max_runs_per_experiment + 1):
             run_count += 1
+            print(
+                f"Baseline run {run_index}/{config.experiments.max_runs_per_experiment}"
+            )
             run_started_at = utc_now()
             run_id = create_run(
                 connection,
@@ -324,7 +373,6 @@ class AutoResearch:
         last_agent_log_path: Path | None = None
         last_agent_stderr_path: Path | None = None
         last_result: CommandResult | None = None
-
         for run_index in range(1, config.experiments.max_runs_per_experiment + 1):
             run_count += 1
             run_started_at = utc_now()
@@ -336,6 +384,9 @@ class AutoResearch:
                 status="running",
                 started_at=run_started_at,
                 created_at=run_started_at,
+            )
+            print(
+                f"Candidate run {run_index}/{config.experiments.max_runs_per_experiment}"
             )
             phase_results = self.run_agent_phases(
                 connection,
@@ -393,6 +444,7 @@ class AutoResearch:
                 timeout_seconds=config.session.max_duration_seconds,
                 metric_pattern=config.commands.metric_pattern,
             )
+            print("Evaluation finished")
             if result.metric_value is None:
                 result = CommandResult(
                     command=result.command,
@@ -431,6 +483,7 @@ class AutoResearch:
 
         summary_text = self.build_fallback_summary(last_result)
         summary_path = self.logs_dir / f"experiment-{experiment_index}-summary.md"
+        print(f"Writing summary for experiment {experiment_index}")
         if agent.session_id:
             summary_result = agent.run(
                 self.build_summary_prompt(last_result),
@@ -478,6 +531,7 @@ class AutoResearch:
         config = self.require_config()
         phase_results: list[AgentPhaseResult] = []
         for phase in ("planning", "execution", "issue_resolution"):
+            print(f"Agent phase: {phase}")
             prompt = self.build_agent_phase_prompt(
                 template, experiment_index, run_index, phase
             )
@@ -586,6 +640,12 @@ class AutoResearch:
                     "least one metric that can be parsed from stdout."
                 ),
                 (
+                    "Prefer reproducible setup changes: use deterministic local commands, "
+                    "avoid hidden manual steps, document or pin dependencies and entry "
+                    "points where needed, and make the prepared run as repeatable as "
+                    "possible in a fresh local checkout."
+                ),
+                (
                     "Update autoresearch.yaml so commands.run and "
                     "commands.metric_pattern match the prepared repo command."
                 ),
@@ -659,36 +719,82 @@ def run_command(
     timeout_seconds: int,
     metric_pattern: str | None = None,
 ) -> CommandResult:
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        shell=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    queue: Queue[tuple[str, str]] = Queue()
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+
+    def reader(stream, name: str, output_parts: list[str]) -> None:
+        try:
+            if stream is None:
+                return
+            for chunk in iter(stream.readline, ""):
+                output_parts.append(chunk)
+                queue.put((name, chunk))
+        finally:
+            if stream is not None:
+                stream.close()
+
+    stdout_thread = threading.Thread(
+        target=reader,
+        args=(process.stdout, "stdout", stdout_parts),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=reader,
+        args=(process.stderr, "stderr", stderr_parts),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    timed_out = False
+    metric_value: float | None = None
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(cwd),
-            shell=True,
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        stdout = error.stdout or ""
-        stderr = error.stderr or ""
+        exit_code = process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        exit_code = None
+
+    while stdout_thread.is_alive() or stderr_thread.is_alive() or not queue.empty():
+        try:
+            stream_name, chunk = queue.get(timeout=0.1)
+        except Empty:
+            continue
+        if metric_pattern and metric_value is None and stream_name == "stdout":
+            metric_value = parse_metric("".join(stdout_parts), metric_pattern)
+
+    stdout_thread.join(timeout=1)
+    stderr_thread.join(timeout=1)
+    stdout = "".join(stdout_parts)
+    stderr = "".join(stderr_parts)
+
+    if timed_out:
         return CommandResult(
             command=command,
             exit_code=None,
             stdout=stdout,
             stderr=stderr,
             status="timed_out",
-            metric_value=parse_metric(stdout, metric_pattern),
+            metric_value=metric_value or parse_metric(stdout, metric_pattern),
         )
 
-    status = "completed" if completed.returncode == 0 else "failed"
+    status = "completed" if exit_code == 0 else "failed"
     return CommandResult(
         command=command,
-        exit_code=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
         status=status,
-        metric_value=parse_metric(completed.stdout, metric_pattern),
+        metric_value=metric_value or parse_metric(stdout, metric_pattern),
     )
 
 
@@ -700,6 +806,35 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite any existing easy-autoresearch setup before starting.",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without starting the local observability server.",
+    )
+    parser.add_argument(
+        "--server-port",
+        type=int,
+        default=8765,
+        help="Port for the local observability server.",
+    )
+    return parser
+
+
+def build_dashboard_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="easy-autoresearch dashboard")
+    parser.add_argument("repo_path", nargs="?", type=Path, default=Path("."))
+    parser.add_argument(
+        "--server-port",
+        type=int,
+        default=8765,
+        help="Port for the local observability server.",
+    )
+    return parser
+
+
+def build_dashboard_stop_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="easy-autoresearch dashboard-stop")
+    parser.add_argument("repo_path", nargs="?", type=Path, default=Path("."))
     return parser
 
 
@@ -753,9 +888,48 @@ def prompt_for_setup_review(repo_path: Path) -> bool:
         print("Enter 'y' to start or 'n' to stop.")
 
 
+def run_dashboard_command(argv: list[str] | None = None) -> int:
+    parser = build_dashboard_parser()
+    args = parser.parse_args(argv)
+    autoresearch = AutoResearch(args.repo_path, server_port=args.server_port)
+    autoresearch.start_dashboard()
+    return 0
+
+
+def run_dashboard_stop_command(argv: list[str] | None = None) -> int:
+    parser = build_dashboard_stop_parser()
+    args = parser.parse_args(argv)
+    dashboard_server = DashboardServer(repo_path=args.repo_path.resolve())
+    if dashboard_server.stop():
+        print(f"Dashboard stopped for {args.repo_path.resolve()}")
+    else:
+        print(f"No running dashboard found for {args.repo_path.resolve()}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "dashboard":
+        return run_dashboard_command(argv[1:])
+    if argv and argv[0] == "dashboard-stop":
+        return run_dashboard_stop_command(argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
-    autoresearch = AutoResearch(args.repo_path)
-    autoresearch.setup(overwrite=args.overwrite)
-    return autoresearch.start()
+    autoresearch = AutoResearch(
+        args.repo_path,
+        headless=args.headless,
+        server_port=args.server_port,
+    )
+    autoresearch.resolve_setup_state(overwrite=args.overwrite)
+    autoresearch.scaffold_if_needed()
+    autoresearch.start_dashboard()
+    try:
+        autoresearch.review_scaffold_if_needed()
+        autoresearch.prepare_repo_setup()
+        autoresearch.review_prepared_setup_if_needed()
+        return autoresearch.run_session()
+    finally:
+        try:
+            autoresearch.stop_dashboard()
+        except RuntimeError:
+            pass

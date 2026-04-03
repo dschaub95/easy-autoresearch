@@ -5,7 +5,7 @@ from pathlib import Path
 
 from easy_autoresearch import __version__
 from easy_autoresearch.config import db_path
-from easy_autoresearch.db import initialize_database
+from easy_autoresearch.storage import initialize_database
 
 
 def test_version_is_non_empty_string() -> None:

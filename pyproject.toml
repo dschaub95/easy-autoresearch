@@ -12,9 +12,6 @@ authors = [
   { name = "Darius Schaub" },
 ]
 requires-python = ">=3.10"
-dependencies = [
-  "PyYAML>=6.0",
-]
 classifiers = [
   "Development Status :: 1 - Planning",
   "Intended Audience :: Developers",
@@ -27,23 +24,26 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Topic :: Software Development :: Libraries",
 ]
-urls.Homepage = "https://github.com/dschaub95/easy-autoresearch"
-urls.Repository = "https://github.com/dschaub95/easy-autoresearch"
-
-[project.optional-dependencies]
-dev = [
+dependencies = [
+  "fastapi>=0.115",
+  "jinja2>=3.1",
+  "pyyaml>=6",
+  "uvicorn>=0.32",
+]
+optional-dependencies.dev = [
+  "httpx>=0.28",
   "pre-commit",
   "pytest",
   "ruff>=0.15.5",
   "twine>=4.0.2",
 ]
-test = [
+optional-dependencies.test = [
   "coverage>=7.10",
   "pytest-cov",
 ]
-
-[project.scripts]
-"easy-autoresearch" = "easy_autoresearch.main:main"
+urls.Homepage = "https://github.com/dschaub95/easy-autoresearch"
+urls.Repository = "https://github.com/dschaub95/easy-autoresearch"
+scripts."easy-autoresearch" = "easy_autoresearch.main:main"
 
 [tool.hatch]
 build.targets.wheel.packages = [ "src/easy_autoresearch" ]

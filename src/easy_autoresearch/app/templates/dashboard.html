@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="refresh" content="2" />
+    <title>easy-autoresearch dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell" data-session-pane="expanded">
+      <header class="topbar">
+        <div class="topbar-title">
+          <button
+            type="button"
+            class="pane-toggle"
+            data-pane-toggle
+            aria-expanded="true"
+            aria-controls="session-pane"
+          >
+            Hide Sessions
+          </button>
+          <span class="app-name">easy-autoresearch</span>
+          <span class="app-path">{{ repo_path }}</span>
+        </div>
+        {% if session %}
+        <div class="topbar-meta">
+          <span class="pill pill-{{ session.status }}">{{ session.status }}</span>
+          <span class="meta-chip">Session #{{ session.id }}</span>
+        </div>
+        {% endif %}
+      </header>
+
+      <main class="workspace">
+        <section class="column session-column" id="session-pane">
+          <header class="column-header">
+            <div>
+              <h1>Sessions</h1>
+            </div>
+          </header>
+          <div class="column-body">
+            {% if session %}
+            <article class="row-card row-card-active">
+              <div class="row-main">
+                <div>
+                  <strong>Current Session</strong>
+                  <p class="subtle">Latest persisted session for this repository</p>
+                </div>
+                <span class="pill pill-{{ session.status }}">{{ session.status }}</span>
+              </div>
+              <dl class="info-grid">
+                <div>
+                  <dt>ID</dt>
+                  <dd>#{{ session.id }}</dd>
+                </div>
+                <div>
+                  <dt>Phase</dt>
+                  <dd>{{ active_phase or "Idle" }}</dd>
+                </div>
+                <div>
+                  <dt>Started</dt>
+                  <dd>{{ session.started_at }}</dd>
+                </div>
+                <div>
+                  <dt>Finished</dt>
+                  <dd>{{ session.finished_at or "Running now" }}</dd>
+                </div>
+              </dl>
+            </article>
+            {% else %}
+            <section class="empty-panel">
+              <h2>No session yet</h2>
+              <p class="empty-copy">The dashboard is ready. Start a run and the session feed will appear here.</p>
+            </section>
+            {% endif %}
+          </div>
+        </section>
+
+        <section class="column">
+          <header class="column-header">
+            <div>
+              <h2>Experiments</h2>
+            </div>
+            <span class="meta-chip">{{ experiments|length }} total</span>
+          </header>
+          <div class="column-body">
+            {% if experiments %}
+            <div class="list-stack">
+              {% for experiment in experiments %}
+              <a
+                href="/?experiment_id={{ experiment.id }}"
+                class="row-card row-link {% if selected_experiment_id == experiment.id %}row-card-active{% endif %}"
+              >
+                <div class="row-main">
+                  <div>
+                    <strong>{{ experiment.description }}</strong>
+                    <p class="subtle">{{ experiment.kind|title }} experiment</p>
+                  </div>
+                  <span class="pill pill-{{ experiment.status }}">{{ experiment.status }}</span>
+                </div>
+                <div class="row-stats">
+                  <span>{{ experiment.runs|length }} runs</span>
+                  <span>Best metric {{ experiment.best_metric if experiment.best_metric is not none else "n/a" }}</span>
+                </div>
+              </a>
+              {% endfor %}
+            </div>
+            {% else %}
+            <section class="empty-panel">
+              <h2>No experiments yet</h2>
+              <p class="empty-copy">Experiments will appear here once the session starts writing results.</p>
+            </section>
+            {% endif %}
+          </div>
+        </section>
+
+        <section class="column">
+          <header class="column-header">
+            <div>
+              <h2>Runs</h2>
+            </div>
+            {% if selected_experiment %}
+            <span class="meta-chip">{{ selected_experiment.runs|length }} runs</span>
+            {% endif %}
+          </header>
+          <div class="column-body">
+            {% if selected_experiment %}
+            <div class="selection-bar">
+              <div>
+                <strong>{{ selected_experiment.description }}</strong>
+                <p class="subtle">{{ selected_experiment.kind|title }} experiment</p>
+              </div>
+              <span class="pill pill-{{ selected_experiment.status }}">{{ selected_experiment.status }}</span>
+            </div>
+            {% if selected_experiment.runs %}
+            <div class="list-stack">
+              {% for run in selected_experiment.runs %}
+              <a
+                href="/?experiment_id={{ selected_experiment.id }}&run_id={{ run.id }}"
+                class="row-card row-link {% if selected_run_id == run.id %}row-card-active{% endif %}"
+              >
+                <div class="row-main">
+                  <div>
+                    <strong>Run {{ run.run_index }}</strong>
+                    <p class="subtle">{{ run.started_at }}</p>
+                  </div>
+                  <span class="pill pill-{{ run.status }}">{{ run.status }}</span>
+                </div>
+                <div class="info-grid compact-grid">
+                  <div>
+                    <dt>Metric</dt>
+                    <dd>{{ run.metric_value if run.metric_value is not none else "n/a" }}</dd>
+                  </div>
+                  <div>
+                    <dt>Exit code</dt>
+                    <dd>{{ run.exit_code if run.exit_code is not none else "running" }}</dd>
+                  </div>
+                  <div>
+                    <dt>Finished</dt>
+                    <dd>{{ run.finished_at or "Running now" }}</dd>
+                  </div>
+                  <div>
+                    <dt>Command</dt>
+                    <dd>{{ run.command }}</dd>
+                  </div>
+                </div>
+              </a>
+              {% endfor %}
+            </div>
+            {% else %}
+            <section class="empty-panel">
+              <h2>No runs yet</h2>
+              <p class="empty-copy">This experiment has been created but has not recorded any runs.</p>
+            </section>
+            {% endif %}
+            {% else %}
+            <section class="empty-panel">
+              <h2>No experiment selected</h2>
+              <p class="empty-copy">Choose an experiment from the middle column to inspect its runs.</p>
+            </section>
+            {% endif %}
+          </div>
+        </section>
+
+        <section class="column">
+          <header class="column-header">
+            <div>
+              <h2>Activity</h2>
+            </div>
+            {% if selected_run %}
+            <span class="meta-chip">Run {{ selected_run.run_index }}</span>
+            {% endif %}
+          </header>
+          <div class="column-body">
+            {% if selected_run %}
+            <div class="selection-bar">
+              <div>
+                <strong>Run {{ selected_run.run_index }}</strong>
+                <p class="subtle">{{ selected_run.started_at }}</p>
+              </div>
+              <span class="pill pill-{{ selected_run.status }}">{{ selected_run.status }}</span>
+            </div>
+            <div class="detail-stack">
+              <article class="row-card">
+                <strong>Run details</strong>
+                <dl class="info-grid compact-grid">
+                  <div>
+                    <dt>Metric</dt>
+                    <dd>{{ selected_run.metric_value if selected_run.metric_value is not none else "n/a" }}</dd>
+                  </div>
+                  <div>
+                    <dt>Exit code</dt>
+                    <dd>{{ selected_run.exit_code if selected_run.exit_code is not none else "running" }}</dd>
+                  </div>
+                  <div>
+                    <dt>Status</dt>
+                    <dd>{{ selected_run.status }}</dd>
+                  </div>
+                  <div>
+                    <dt>Finished</dt>
+                    <dd>{{ selected_run.finished_at or "Running now" }}</dd>
+                  </div>
+                </dl>
+              </article>
+
+              <section class="activity-panel">
+                <div class="section-heading">
+                  <h3>Run activity</h3>
+                  <span class="meta-chip">{{ selected_run_activities|length }} steps</span>
+                </div>
+                {% if selected_run_activities %}
+                <ul class="activity-list">
+                  {% for step in selected_run_activities %}
+                  <li class="activity-row">
+                    <div>
+                      <strong>{{ step.phase }}</strong>
+                      <p class="subtle">{{ step.started_at }}</p>
+                    </div>
+                    <span class="pill pill-{{ step.status }}">{{ step.status }}</span>
+                  </li>
+                  {% endfor %}
+                </ul>
+                {% else %}
+                <p class="empty-copy">No agent steps were recorded for this run.</p>
+                {% endif %}
+              </section>
+            </div>
+            {% else %}
+            <section class="empty-panel">
+              <h2>No run selected</h2>
+              <p class="empty-copy">Choose a run from the third column to inspect its activity.</p>
+            </section>
+            {% endif %}
+          </div>
+        </section>
+      </main>
+    </div>
+    <script>
+      (function () {
+        const shell = document.querySelector(".app-shell");
+        const toggle = document.querySelector("[data-pane-toggle]");
+        if (!shell || !toggle) return;
+
+        const storageKey = "easy-autoresearch-session-pane";
+        const applyState = (state) => {
+          const expanded = state !== "collapsed";
+          shell.dataset.sessionPane = expanded ? "expanded" : "collapsed";
+          toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+          toggle.textContent = expanded ? "Hide Sessions" : "Show Sessions";
+        };
+
+        applyState(window.localStorage.getItem(storageKey) || "expanded");
+
+        toggle.addEventListener("click", function () {
+          const nextState =
+            shell.dataset.sessionPane === "collapsed" ? "expanded" : "collapsed";
+          window.localStorage.setItem(storageKey, nextState);
+          applyState(nextState);
+        });
+      })();
+    </script>
+  </body>
+</html>
