@@ -634,20 +634,26 @@ class AutoResearch:
             part
             for part in [
                 template,
+                "Prepare this repository for repeated local optimization of its end-to-end workflow.",
                 (
-                    "Prepare this repository for easy-autoresearch. Create or adjust a "
-                    "clear runnable entry point for the project and ensure it prints at "
-                    "least one metric that can be parsed from stdout."
+                    "Create or adjust a clear local run command that generally includes "
+                    "both training and evaluation. Ensure it prints at least one "
+                    "meaningful scalar metric to stdout, and update autoresearch.yaml "
+                    "so commands.run is that command and commands.metric_pattern "
+                    "matches that metric."
                 ),
                 (
-                    "Prefer reproducible setup changes: use deterministic local commands, "
-                    "avoid hidden manual steps, document or pin dependencies and entry "
-                    "points where needed, and make the prepared run as repeatable as "
-                    "possible in a fresh local checkout."
+                    "Make each run reproducible: rerunning commands.run should "
+                    "generally produce the same result, especially through explicit "
+                    "seeding where needed."
                 ),
                 (
-                    "Update autoresearch.yaml so commands.run and "
-                    "commands.metric_pattern match the prepared repo command."
+                    "Keep commands.run free of tunable hyperparameters; change them in "
+                    "tracked code or config files instead."
+                ),
+                (
+                    "Do not optimize the repo in this step; only make the minimum setup "
+                    "changes needed for reliable optimization."
                 ),
             ]
             if part

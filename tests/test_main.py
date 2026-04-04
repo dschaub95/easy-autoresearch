@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import easy_autoresearch.main as main_module
 from easy_autoresearch.agent import AgentRunResult
 from easy_autoresearch.config import (
     CONFIG_FILENAME,
@@ -151,6 +152,20 @@ def test_setup_can_be_cancelled_for_config_review(
         sessions = connection.execute("SELECT COUNT(*) FROM sessions").fetchone()
 
     assert sessions == (0,)
+
+
+def test_build_setup_prompt_forbids_hardcoded_hyperparameters_in_run_command(
+    tmp_path: Path,
+) -> None:
+    repo_path = tmp_path / "target-repo"
+    autoresearch = main_module.AutoResearch(repo_path)
+
+    prompt = autoresearch.build_setup_prompt("template")
+
+    assert (
+        "Keep commands.run free of tunable hyperparameters; change them in tracked "
+        "code or config files instead." in prompt
+    )
 
 
 def test_run_starts_dashboard_server_and_prints_selected_url(
