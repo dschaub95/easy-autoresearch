@@ -396,7 +396,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             metric_value=1.0,
         ),
         CommandResult(
-            command="baseline",
+            command="candidate",
             exit_code=1,
             stdout="metric: 2.0\n",
             stderr="",
@@ -424,6 +424,14 @@ def test_run_uses_coding_agent_for_candidate_experiments(
     )
 
     evaluation_results = command_results(
+        CommandResult(
+            command="run",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
         CommandResult(
             command="run",
             exit_code=1,
@@ -461,7 +469,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             self.calls += 1
             text = (
                 "Hypothesis\nImprove the metric.\n\nApproach\nMake a change.\n\nFindings\nMetric improved."
-                if self.calls == 4
+                if "Summarize this experiment in plain text" in prompt
                 else "working"
             )
             kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
@@ -492,7 +500,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
     with sqlite3.connect(db_path(repo_path)) as connection:
         sessions = connection.execute("SELECT status FROM sessions").fetchall()
         experiments = connection.execute(
-            "SELECT kind, status, best_metric, agent_provider, agent_session_id, summary_path "
+            "SELECT kind, status, best_metric, agent_provider, agent_session_id, summary_path, max_runs "
             "FROM experiments ORDER BY id"
         ).fetchall()
         agent_steps = connection.execute(
@@ -505,7 +513,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
 
     assert sessions == [("failed",), ("completed",)]
     assert experiments == [
-        ("baseline", "failed", 1.0, None, None, None),
+        ("baseline", "failed", 1.0, None, None, None, 1),
         (
             "candidate",
             "failed",
@@ -513,40 +521,52 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             "codex",
             "setup-session",
             ".autoresearch/logs/experiment-1-summary.md",
+            1,
         ),
-        ("baseline", "failed", 2.0, None, None, None),
+        ("baseline", "failed", 2.0, None, None, None, 1),
+        (
+            "candidate",
+            "failed",
+            2.0,
+            "codex",
+            "sess-123",
+            ".autoresearch/logs/experiment-1-summary.md",
+            2,
+        ),
         (
             "candidate",
             "completed",
             3.0,
             "codex",
             "sess-123",
-            ".autoresearch/logs/experiment-1-summary.md",
+            ".autoresearch/logs/experiment-2-summary.md",
+            2,
         ),
     ]
     assert runs == [
         ("failed", 1, 1.0, ".autoresearch/experiment-1-run-1.log"),
         ("failed", 1, 2.0, ".autoresearch/experiment-1-run-1.log"),
+        ("failed", 1, 2.0, ".autoresearch/experiment-1-run-1.log"),
         ("failed", 1, 1.0, ".autoresearch/experiment-1-run-1.log"),
         ("failed", 1, 2.0, ".autoresearch/experiment-1-run-2.log"),
-        ("completed", 0, 3.0, ".autoresearch/experiment-1-run-1.log"),
+        ("completed", 0, 3.0, ".autoresearch/experiment-2-run-1.log"),
     ]
     assert [row[:4] for row in agent_steps[-3:]] == [
         (1, "planning", "completed", "sess-123"),
         (1, "execution", "completed", "sess-123"),
         (1, "issue_resolution", "completed", "sess-123"),
     ]
-    assert all("Experiment 1, attempt 1, phase:" in row[4] for row in agent_steps[-3:])
+    assert all("Experiment 2, attempt 1, phase:" in row[4] for row in agent_steps[-3:])
     assert all(row[5] == "working" for row in agent_steps[-3:])
-    assert agent_steps[-3][6].endswith("experiment-1-run-1.planning.agent.jsonl")
-    assert agent_steps[-2][6].endswith("experiment-1-run-1.execution.agent.jsonl")
+    assert agent_steps[-3][6].endswith("experiment-2-run-1.planning.agent.jsonl")
+    assert agent_steps[-2][6].endswith("experiment-2-run-1.execution.agent.jsonl")
     assert agent_steps[-1][6].endswith(
-        "experiment-1-run-1.issue_resolution.agent.jsonl"
+        "experiment-2-run-1.issue_resolution.agent.jsonl"
     )
     assert "Hypothesis" in (
-        repo_path / ".autoresearch" / "logs" / "experiment-1-summary.md"
+        repo_path / ".autoresearch" / "logs" / "experiment-2-summary.md"
     ).read_text(encoding="utf-8")
-    assert fake_agent.calls == 4
+    assert fake_agent.calls == 11
 
 
 def test_run_skips_repo_command_when_agent_phase_fails(

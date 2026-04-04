@@ -237,7 +237,7 @@ class AutoResearch:
                 session_id=session_id,
                 kind="baseline",
                 description="Initial baseline execution",
-                max_runs=config.experiments.max_runs_per_experiment,
+                max_runs=1,
                 status="running",
                 agent_provider=None,
                 created_at=baseline_started_at,
@@ -301,61 +301,46 @@ class AutoResearch:
         experiment_index: int,
     ) -> tuple[str, float | None, int]:
         config = self.require_config()
-        best_metric: float | None = None
-        experiment_status = "failed"
-        run_count = 0
-        for run_index in range(1, config.experiments.max_runs_per_experiment + 1):
-            run_count += 1
-            print(
-                f"Baseline run {run_index}/{config.experiments.max_runs_per_experiment}"
-            )
-            run_started_at = utc_now()
-            run_id = create_run(
-                connection,
-                experiment_id=experiment_id,
-                run_index=run_index,
-                command=config.commands.run,
-                status="running",
-                started_at=run_started_at,
-                created_at=run_started_at,
-            )
-            result = run_command(
-                config.commands.run,
-                cwd=self.repo_path,
-                timeout_seconds=config.session.max_duration_seconds,
-                metric_pattern=config.commands.metric_pattern,
-            )
-            log_path = (
-                self.state_dir / f"experiment-{experiment_index}-run-{run_index}.log"
-            )
-            log_path.write_text(result.stdout, encoding="utf-8")
-            finish_run(
-                connection,
-                run_id=run_id,
-                status=result.status,
-                exit_code=result.exit_code,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                metric_value=result.metric_value,
-                log_path=str(log_path.relative_to(self.repo_path)),
-                finished_at=utc_now(),
-            )
-            if result.metric_value is not None and (
-                best_metric is None or result.metric_value > best_metric
-            ):
-                best_metric = result.metric_value
-            if result.status == "completed":
-                experiment_status = "completed"
-                break
+        run_index = 1
+        print("Baseline run 1/1")
+        run_started_at = utc_now()
+        run_id = create_run(
+            connection,
+            experiment_id=experiment_id,
+            run_index=run_index,
+            command=config.commands.run,
+            status="running",
+            started_at=run_started_at,
+            created_at=run_started_at,
+        )
+        result = run_command(
+            config.commands.run,
+            cwd=self.repo_path,
+            timeout_seconds=config.session.max_duration_seconds,
+            metric_pattern=config.commands.metric_pattern,
+        )
+        log_path = self.state_dir / f"experiment-{experiment_index}-run-{run_index}.log"
+        log_path.write_text(result.stdout, encoding="utf-8")
+        finish_run(
+            connection,
+            run_id=run_id,
+            status=result.status,
+            exit_code=result.exit_code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            metric_value=result.metric_value,
+            log_path=str(log_path.relative_to(self.repo_path)),
+            finished_at=utc_now(),
+        )
 
         update_experiment(
             connection,
             experiment_id=experiment_id,
-            status=experiment_status,
+            status=result.status,
             updated_at=utc_now(),
-            best_metric=best_metric,
+            best_metric=result.metric_value,
         )
-        return experiment_status, best_metric, run_count
+        return result.status, result.metric_value, 1
 
     def run_agent_experiment(
         self,
