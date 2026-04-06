@@ -160,12 +160,13 @@ def test_build_setup_prompt_forbids_hardcoded_hyperparameters_in_run_command(
     repo_path = tmp_path / "target-repo"
     autoresearch = main_module.AutoResearch(repo_path)
 
-    prompt = autoresearch.build_setup_prompt("template")
+    prompt = autoresearch.build_setup_prompt()
 
     assert (
         "Keep commands.run free of tunable hyperparameters; change them in tracked "
         "code or config files instead." in prompt
     )
+    assert "template" not in prompt
 
 
 def test_run_starts_dashboard_server_and_prints_selected_url(
@@ -422,6 +423,10 @@ def test_run_uses_coding_agent_for_candidate_experiments(
         max_experiments=2,
         max_runs_per_experiment=2,
     )
+    (repo_path / ".autoresearch" / "prompts" / "codex-system.md").write_text(
+        "template marker",
+        encoding="utf-8",
+    )
 
     evaluation_results = command_results(
         CommandResult(
@@ -556,8 +561,15 @@ def test_run_uses_coding_agent_for_candidate_experiments(
         (1, "execution", "completed", "sess-123"),
         (1, "issue_resolution", "completed", "sess-123"),
     ]
+    assert agent_steps[-4][:4] == (0, "initial_planning", "completed", "sess-123")
+    assert "Experiment 2, initial planning." in agent_steps[-4][4]
+    assert "template marker" in agent_steps[-4][4]
+    assert "Candidate experiment 1" in agent_steps[-4][4]
+    assert "Metric: 2.0" in agent_steps[-4][4]
     assert all("Experiment 2, attempt 1, phase:" in row[4] for row in agent_steps[-3:])
     assert all(row[5] == "working" for row in agent_steps[-3:])
+    assert agent_steps[-4][5] == "working"
+    assert agent_steps[-4][6].endswith("experiment-2.initial_planning.agent.jsonl")
     assert agent_steps[-3][6].endswith("experiment-2-run-1.planning.agent.jsonl")
     assert agent_steps[-2][6].endswith("experiment-2-run-1.execution.agent.jsonl")
     assert agent_steps[-1][6].endswith(
@@ -566,7 +578,19 @@ def test_run_uses_coding_agent_for_candidate_experiments(
     assert "Hypothesis" in (
         repo_path / ".autoresearch" / "logs" / "experiment-2-summary.md"
     ).read_text(encoding="utf-8")
-    assert fake_agent.calls == 11
+    assert fake_agent.calls == 13
+    assert sum("template marker" in prompt for prompt in fake_agent.prompts) == 2
+
+
+def test_scaffolded_codex_system_prompt_is_empty(tmp_path: Path) -> None:
+    repo_path = tmp_path / "project"
+
+    autoresearch = main_module.AutoResearch(repo_path)
+    autoresearch.scaffold_repo()
+
+    assert (repo_path / ".autoresearch" / "prompts" / "codex-system.md").read_text(
+        encoding="utf-8"
+    ) == ""
 
 
 def test_run_skips_repo_command_when_agent_phase_fails(
@@ -630,8 +654,14 @@ def test_run_skips_repo_command_when_agent_phase_fails(
 
         def run(self, prompt: str, **kwargs) -> AgentRunResult:
             self.calls += 1
-            exit_code = 0 if self.calls == 1 else 1
-            text = "plan" if self.calls == 1 else "execution failed"
+            exit_code = 0 if self.calls < 3 else 1
+            text = (
+                "initial plan"
+                if self.calls == 1
+                else "plan"
+                if self.calls == 2
+                else "execution failed"
+            )
             kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
             kwargs["stderr_path"].write_text(
                 "boom\n" if exit_code else "", encoding="utf-8"
@@ -665,7 +695,8 @@ def test_run_skips_repo_command_when_agent_phase_fails(
             "SELECT status, exit_code, metric_value FROM runs ORDER BY id"
         ).fetchall()
 
-    assert agent_steps[-2:] == [
+    assert agent_steps[-3:] == [
+        ("initial_planning", "completed", 0, "initial plan", ""),
         ("planning", "completed", 0, "plan", ""),
         ("execution", "failed", 1, "execution failed", "boom\n"),
     ]

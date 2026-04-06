@@ -18,7 +18,6 @@ from .agent import CodingAgent
 from .app.server import DashboardServer
 from .codex import Codex
 from .config import (
-    CODEX_SYSTEM_PROMPT,
     AutoResearchConfig,
     config_path,
     db_path,
@@ -28,6 +27,14 @@ from .config import (
     prompts_dir,
     state_dir,
     write_config,
+)
+from .prompts import (
+    CODEX_SYSTEM_PROMPT,
+    build_agent_phase_prompt,
+    build_fallback_summary,
+    build_initial_planning_prompt,
+    build_setup_prompt,
+    build_summary_prompt,
 )
 from .storage import (
     connect,
@@ -58,11 +65,14 @@ class CommandResult:
 
 
 AgentPhase = Literal["planning", "execution", "issue_resolution"]
+AgentStepPhase = Literal[
+    "initial_planning", "planning", "execution", "issue_resolution"
+]
 
 
 @dataclass(slots=True)
 class AgentPhaseResult:
-    phase: AgentPhase
+    phase: AgentStepPhase
     prompt: str
     status: str
     exit_code: int | None
@@ -166,9 +176,8 @@ class AutoResearch:
     def prepare_repo_setup(self) -> None:
         if not self.did_scaffold or not self.ready_to_start:
             return
-        template = self.load_prompt_template()
         result = create_agent(self.require_config(), self.repo_path).run(
-            self.build_setup_prompt(template),
+            self.build_setup_prompt(),
             output_path=self.logs_dir / "setup.agent.jsonl",
             stderr_path=self.logs_dir / "setup.agent.stderr.log",
             timeout_seconds=self.require_config().session.max_duration_seconds,
@@ -358,6 +367,44 @@ class AutoResearch:
         last_agent_log_path: Path | None = None
         last_agent_stderr_path: Path | None = None
         last_result: CommandResult | None = None
+        initial_planning_result = self.run_initial_planning_step(
+            connection,
+            agent=agent,
+            template=template,
+            experiment_id=experiment_id,
+            experiment_index=experiment_index,
+        )
+        if initial_planning_result is not None:
+            last_agent_log_path = initial_planning_result.log_path
+            last_agent_stderr_path = initial_planning_result.stderr_path
+        if (
+            initial_planning_result is not None
+            and initial_planning_result.status != "completed"
+        ):
+            summary_text = self.build_fallback_summary(last_result)
+            summary_path = self.logs_dir / f"experiment-{experiment_index}-summary.md"
+            summary_path.write_text(summary_text, encoding="utf-8")
+            update_experiment(
+                connection,
+                experiment_id=experiment_id,
+                status=experiment_status,
+                updated_at=utc_now(),
+                best_metric=best_metric,
+                agent_session_id=agent.session_id,
+                summary=summary_text,
+                summary_path=str(summary_path.relative_to(self.repo_path)),
+                agent_log_path=(
+                    str(last_agent_log_path.relative_to(self.repo_path))
+                    if last_agent_log_path is not None
+                    else None
+                ),
+                agent_stderr_path=(
+                    str(last_agent_stderr_path.relative_to(self.repo_path))
+                    if last_agent_stderr_path is not None
+                    else None
+                ),
+            )
+            return experiment_status, best_metric, run_count
         for run_index in range(1, config.experiments.max_runs_per_experiment + 1):
             run_count += 1
             run_started_at = utc_now()
@@ -376,7 +423,6 @@ class AutoResearch:
             phase_results = self.run_agent_phases(
                 connection,
                 agent=agent,
-                template=template,
                 experiment_id=experiment_id,
                 experiment_index=experiment_index,
                 run_index=run_index,
@@ -503,12 +549,78 @@ class AutoResearch:
         )
         return experiment_status, best_metric, run_count
 
-    def run_agent_phases(
+    def run_initial_planning_step(
         self,
         connection,
         *,
         agent: CodingAgent,
         template: str,
+        experiment_id: int,
+        experiment_index: int,
+    ) -> AgentPhaseResult | None:
+        print("Agent phase: initial_planning")
+        prompt = self.build_initial_planning_prompt(
+            connection,
+            template=template,
+            experiment_id=experiment_id,
+            experiment_index=experiment_index,
+        )
+        started_at = utc_now()
+        step_id = create_agent_step(
+            connection,
+            experiment_id=experiment_id,
+            run_index=0,
+            phase="initial_planning",
+            prompt=prompt,
+            status="running",
+            started_at=started_at,
+            created_at=started_at,
+        )
+        output_path = (
+            self.logs_dir
+            / f"experiment-{experiment_index}.initial_planning.agent.jsonl"
+        )
+        stderr_path = (
+            self.logs_dir
+            / f"experiment-{experiment_index}.initial_planning.agent.stderr.log"
+        )
+        result = agent.run(
+            prompt,
+            output_path=output_path,
+            stderr_path=stderr_path,
+            timeout_seconds=self.require_config().session.max_duration_seconds,
+        )
+        status = "completed" if result.exit_code == 0 else "failed"
+        phase_result = AgentPhaseResult(
+            phase="initial_planning",
+            prompt=prompt,
+            status=status,
+            exit_code=result.exit_code,
+            log_path=output_path,
+            stderr_path=stderr_path,
+            response_text=result.text,
+            stderr=result.stderr,
+            agent_session_id=result.session_id,
+        )
+        finish_agent_step(
+            connection,
+            step_id=step_id,
+            status=status,
+            exit_code=result.exit_code,
+            agent_session_id=result.session_id,
+            response_text=result.text,
+            stderr=result.stderr,
+            log_path=str(output_path.relative_to(self.repo_path)),
+            stderr_path=str(stderr_path.relative_to(self.repo_path)),
+            finished_at=utc_now(),
+        )
+        return phase_result
+
+    def run_agent_phases(
+        self,
+        connection,
+        *,
+        agent: CodingAgent,
         experiment_id: int,
         experiment_index: int,
         run_index: int,
@@ -517,9 +629,7 @@ class AutoResearch:
         phase_results: list[AgentPhaseResult] = []
         for phase in ("planning", "execution", "issue_resolution"):
             print(f"Agent phase: {phase}")
-            prompt = self.build_agent_phase_prompt(
-                template, experiment_index, run_index, phase
-            )
+            prompt = self.build_agent_phase_prompt(experiment_index, run_index, phase)
             started_at = utc_now()
             step_id = create_agent_step(
                 connection,
@@ -576,103 +686,77 @@ class AutoResearch:
 
     def build_agent_phase_prompt(
         self,
-        template: str,
         experiment_index: int,
         run_index: int,
         phase: AgentPhase,
     ) -> str:
         config = self.require_config()
-        phase_instructions = {
-            "planning": (
-                "Inspect the repository and produce a concise implementation plan for "
-                "the most promising change to make this experiment a success. Do not edit files yet."
-            ),
-            "execution": (
-                "Implement the planned change in this same session. Make concrete "
-                "modifications to repository files so the workspace reflects the "
-                "experiment before evaluation. Leave the workspace runnable, but do "
-                "not run the final evaluation command."
-            ),
-            "issue_resolution": (
-                "Review the changes for likely issues, fix anything necessary, and "
-                "leave the workspace ready for evaluation. Do not run the final "
-                "evaluation command."
-            ),
-        }
-        return "\n\n".join(
-            part
-            for part in [
-                template,
-                f"Experiment {experiment_index}, attempt {run_index}, phase: {phase}.",
-                phase_instructions[phase],
-                f"The evaluation command is `{config.commands.run}`.",
-                (
-                    "Do not write the final experiment summary yet. The harness will run "
-                    "the evaluation command only after all three phases succeed."
-                ),
-            ]
-            if part
+        return build_agent_phase_prompt(
+            experiment_index=experiment_index,
+            run_index=run_index,
+            phase=phase,
+            evaluation_command=config.commands.run,
         )
 
-    def build_setup_prompt(self, template: str) -> str:
-        return "\n\n".join(
-            part
-            for part in [
-                template,
-                "Prepare this repository for repeated local optimization of its end-to-end workflow.",
-                (
-                    "Create or adjust a clear local run command that generally includes "
-                    "both training and evaluation. Ensure it prints at least one "
-                    "meaningful scalar metric to stdout, and update autoresearch.yaml "
-                    "so commands.run is that command and commands.metric_pattern "
-                    "matches that metric."
-                ),
-                (
-                    "Make each run reproducible: rerunning commands.run should "
-                    "generally produce the same result, especially through explicit "
-                    "seeding where needed."
-                ),
-                (
-                    "Keep commands.run free of tunable hyperparameters; change them in "
-                    "tracked code or config files instead."
-                ),
-                (
-                    "Do not optimize the repo in this step; only make the minimum setup "
-                    "changes needed for reliable optimization."
-                ),
-            ]
-            if part
+    def build_initial_planning_prompt(
+        self,
+        connection,
+        *,
+        template: str | None,
+        experiment_id: int,
+        experiment_index: int,
+    ) -> str:
+        config = self.require_config()
+        return build_initial_planning_prompt(
+            template,
+            experiment_index=experiment_index,
+            evaluation_command=config.commands.run,
+            session_history=self.current_session_history_for_experiment(
+                connection,
+                experiment_id=experiment_id,
+            ),
         )
+
+    def current_session_history_for_experiment(
+        self,
+        connection,
+        *,
+        experiment_id: int,
+    ) -> str:
+        rows = connection.execute(
+            """
+            SELECT previous.description, previous.best_metric, previous.summary
+            FROM experiments AS current
+            JOIN experiments AS previous
+                ON previous.session_id = current.session_id
+            WHERE current.id = ?
+              AND previous.id < current.id
+              AND previous.summary IS NOT NULL
+            ORDER BY previous.id ASC
+            """,
+            (experiment_id,),
+        ).fetchall()
+        if not rows:
+            return "No prior experiment summaries are available in this session."
+        return "\n\n".join(
+            "\n".join(
+                [
+                    row["description"],
+                    f"Metric: {row['best_metric']}",
+                    f"Summary:\n{row['summary']}",
+                ]
+            )
+            for row in rows
+        )
+
+    def build_setup_prompt(self) -> str:
+        return build_setup_prompt()
 
     def build_summary_prompt(self, result: CommandResult | None) -> str:
-        return "\n\n".join(
-            [
-                "Summarize this experiment in plain text under the headings "
-                "Hypothesis, Approach, Findings.",
-                f"Evaluation status: {result.status if result else 'not run'}",
-                f"Metric: {result.metric_value if result else 'n/a'}",
-                f"Stdout:\n{result.stdout if result else ''}",
-                f"Stderr:\n{result.stderr if result else ''}",
-            ]
-        )
+        return build_summary_prompt(result)
 
     def build_fallback_summary(self, result: CommandResult | None) -> str:
-        return "\n".join(
-            [
-                "Hypothesis",
-                "No agent summary was captured.",
-                "",
-                "Approach",
-                "The harness executed the configured experiment flow.",
-                "",
-                "Findings",
-                (
-                    f"Status: {result.status}, metric: {result.metric_value}"
-                    if result is not None
-                    else "No evaluation command completed."
-                ),
-            ]
-        )
+        return build_fallback_summary(result)
 
     def load_prompt_template(self) -> str:
         prompt_path = self.repo_path / self.require_config().agent.prompt_template

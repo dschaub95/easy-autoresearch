@@ -15,21 +15,6 @@ PROMPTS_DIRNAME = "prompts"
 LOGS_DIRNAME = "logs"
 DASHBOARD_STATE_FILENAME = "dashboard.json"
 DEFAULT_BASELINE_LOG = "baseline.log"
-CODEX_SYSTEM_PROMPT = """# Codex System Prompt
-
-You are operating inside a repository prepared by easy-autoresearch.
-
-Current phase:
-- No autonomous proposal generation is enabled yet.
-- Use this prompt file as the future home for session-specific Codex instructions.
-
-Expected future responsibilities:
-- inspect repository state
-- plan an experiment step
-- execute the experiment step
-- resolve likely issues before evaluation
-- record results back through the orchestrator
-"""
 
 
 def config_path(repo_path: Path) -> Path:

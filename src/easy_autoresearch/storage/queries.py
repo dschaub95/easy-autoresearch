@@ -131,7 +131,11 @@ def recent_activity(
         title = (
             f"{row['experiment_kind']} run {row['run_index']}"
             if row["activity_type"] == "run"
-            else f"{row['phase']} phase for run {row['run_index']}"
+            else (
+                f"{row['phase']} phase"
+                if int(row["run_index"]) == 0
+                else f"{row['phase']} phase for run {row['run_index']}"
+            )
         )
         activities.append(
             {

@@ -82,9 +82,9 @@ def test_current_session_api_returns_snapshot(tmp_path: Path) -> None:
         create_agent_step(
             connection,
             experiment_id=experiment_id,
-            run_index=1,
-            phase="planning",
-            prompt="plan",
+            run_index=0,
+            phase="initial_planning",
+            prompt="initial plan",
             status="running",
             started_at="2026-04-03T10:00:01+00:00",
             created_at="2026-04-03T10:00:01+00:00",
@@ -97,6 +97,7 @@ def test_current_session_api_returns_snapshot(tmp_path: Path) -> None:
     payload = response.json()
     assert payload["session"]["id"] == session_id
     assert payload["activities"][0]["activity_type"] == "agent_step"
+    assert payload["activities"][0]["title"] == "initial_planning phase"
 
 
 def test_dashboard_can_select_experiment_from_query_param(tmp_path: Path) -> None:
