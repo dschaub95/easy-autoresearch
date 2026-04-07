@@ -2,8 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from easy_autoresearch.agent import AgentRunResult, CodingAgent
-from easy_autoresearch.codex import Codex, run_codex
+from easy_autoresearch.agent import AgentRunResult, Codex, CodingAgent
 from easy_autoresearch.config import logs_dir
 
 
@@ -48,7 +47,7 @@ class FakePopen:
         return None
 
 
-def test_run_codex_invokes_cli_and_writes_logs(
+def test_codex_run_invokes_cli_and_writes_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     observed: dict[str, object] = {}
@@ -63,10 +62,10 @@ def test_run_codex_invokes_cli_and_writes_logs(
             returncode=0,
         )
 
-    monkeypatch.setattr("easy_autoresearch.codex.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("easy_autoresearch.agent.codex.subprocess.Popen", fake_popen)
     logs_dir(tmp_path).mkdir(parents=True)
 
-    result = run_codex("your prompt", repo_path=tmp_path)
+    result = Codex(tmp_path).run("your prompt")
 
     assert result == AgentRunResult(
         exit_code=0,
@@ -92,7 +91,7 @@ def test_run_codex_invokes_cli_and_writes_logs(
     assert observed["kwargs"]["text"] is True
 
 
-def test_run_codex_passes_model_flag_when_configured(
+def test_codex_run_passes_model_flag_when_configured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     observed: dict[str, object] = {}
@@ -106,10 +105,10 @@ def test_run_codex_passes_model_flag_when_configured(
             returncode=0,
         )
 
-    monkeypatch.setattr("easy_autoresearch.codex.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("easy_autoresearch.agent.codex.subprocess.Popen", fake_popen)
     logs_dir(tmp_path).mkdir(parents=True)
 
-    run_codex("your prompt", repo_path=tmp_path, model="gpt-5.4")
+    Codex(tmp_path, model="gpt-5.4").run("your prompt")
 
     assert observed["args"] == (
         [
@@ -127,7 +126,7 @@ def test_run_codex_passes_model_flag_when_configured(
     )
 
 
-def test_run_codex_passes_custom_sandbox_flag_when_configured(
+def test_codex_run_passes_custom_sandbox_flag_when_configured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     observed: dict[str, object] = {}
@@ -141,10 +140,10 @@ def test_run_codex_passes_custom_sandbox_flag_when_configured(
             returncode=0,
         )
 
-    monkeypatch.setattr("easy_autoresearch.codex.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("easy_autoresearch.agent.codex.subprocess.Popen", fake_popen)
     logs_dir(tmp_path).mkdir(parents=True)
 
-    run_codex("your prompt", repo_path=tmp_path, sandbox_mode="read-only")
+    Codex(tmp_path, sandbox_mode="read-only").run("your prompt")
 
     assert observed["args"] == (
         [
@@ -177,7 +176,7 @@ def test_codex_reuses_session_id_across_runs(
             command, stdout_lines=stdout_lines, stderr_lines=[], returncode=0
         )
 
-    monkeypatch.setattr("easy_autoresearch.codex.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("easy_autoresearch.agent.codex.subprocess.Popen", fake_popen)
     logs_dir(tmp_path).mkdir(parents=True)
     codex = Codex(tmp_path)
 
@@ -218,7 +217,7 @@ def test_codex_is_a_coding_agent() -> None:
     assert issubclass(Codex, CodingAgent)
 
 
-def test_run_codex_supports_custom_log_paths(
+def test_codex_run_supports_custom_log_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output_path = tmp_path / "logs" / "codex.jsonl"
@@ -233,11 +232,10 @@ def test_run_codex_supports_custom_log_paths(
             returncode=2,
         )
 
-    monkeypatch.setattr("easy_autoresearch.codex.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("easy_autoresearch.agent.codex.subprocess.Popen", fake_popen)
 
-    result = run_codex(
+    result = Codex(tmp_path).run(
         "different prompt",
-        repo_path=tmp_path,
         output_path=output_path,
         stderr_path=stderr_path,
         timeout_seconds=30,

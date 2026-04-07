@@ -10,8 +10,9 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
 
-from .agent import AgentRunResult, CodingAgent
-from .config import logs_dir
+from easy_autoresearch.config import logs_dir
+
+from .base import AgentRunResult, CodingAgent
 
 
 def _session_id(value: Any) -> str | None:
@@ -186,21 +187,3 @@ class Codex(CodingAgent):
             text="\n".join(part for part in text_parts if part).strip(),
             stderr="".join(stderr_parts) or stderr_path.read_text(encoding="utf-8"),
         )
-
-
-def run_codex(
-    prompt: str,
-    *,
-    repo_path: Path,
-    model: str | None = None,
-    sandbox_mode: str = "workspace-write",
-    output_path: Path | None = None,
-    stderr_path: Path | None = None,
-    timeout_seconds: int | None = None,
-) -> AgentRunResult:
-    return Codex(repo_path, model=model, sandbox_mode=sandbox_mode).run(
-        prompt,
-        output_path=output_path,
-        stderr_path=stderr_path,
-        timeout_seconds=timeout_seconds,
-    )

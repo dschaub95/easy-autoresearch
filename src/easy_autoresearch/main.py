@@ -15,9 +15,8 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Literal
 
-from .agent import CodingAgent
+from .agent import Codex, CodingAgent
 from .app.server import DashboardServer
-from .codex import Codex
 from .config import (
     AutoResearchConfig,
     config_path,
