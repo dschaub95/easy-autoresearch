@@ -15,6 +15,7 @@ from easy_autoresearch.config import (
     db_path,
     logs_dir,
 )
+from easy_autoresearch.git import GitWorktreeError
 from easy_autoresearch.main import CommandResult, main
 
 
@@ -72,6 +73,49 @@ class NoOpSetupAgent:
         )
 
 
+@pytest.fixture(autouse=True)
+def fake_git_tracking(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    state: dict[str, object] = {
+        "discard_calls": 0,
+        "restore_calls": 0,
+        "commit_messages": [],
+    }
+
+    monkeypatch.setattr("easy_autoresearch.main.ensure_clean_tracking", lambda _: None)
+    monkeypatch.setattr(
+        "easy_autoresearch.main.has_uncommitted_changes", lambda _: True
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.current_head_sha", lambda _: "base-commit-sha"
+    )
+
+    def fake_discard(_: Path) -> None:
+        state["discard_calls"] = int(state["discard_calls"]) + 1
+
+    def fake_save(_: Path, snapshot_dir: Path) -> None:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        (snapshot_dir / "tracked.patch").write_text("", encoding="utf-8")
+
+    def fake_restore(_: Path, __: Path) -> None:
+        state["restore_calls"] = int(state["restore_calls"]) + 1
+
+    def fake_commit(_: Path, message: str) -> str:
+        messages = state["commit_messages"]
+        assert isinstance(messages, list)
+        messages.append(message)
+        return f"commit-{len(messages)}"
+
+    monkeypatch.setattr(
+        "easy_autoresearch.main.discard_uncommitted_changes", fake_discard
+    )
+    monkeypatch.setattr("easy_autoresearch.main.save_worktree_snapshot", fake_save)
+    monkeypatch.setattr(
+        "easy_autoresearch.main.restore_worktree_snapshot", fake_restore
+    )
+    monkeypatch.setattr("easy_autoresearch.main.commit_all_changes", fake_commit)
+    return state
+
+
 def test_run_scaffolds_and_starts_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -120,7 +164,9 @@ def test_run_scaffolds_and_starts_session(
     assert config["agent"]["prompt_template"] == ".autoresearch/prompts/codex-system.md"
 
     with sqlite3.connect(db_path(repo_path)) as connection:
-        sessions = connection.execute("SELECT status FROM sessions").fetchall()
+        sessions = connection.execute(
+            "SELECT status, setup_commit_sha FROM sessions"
+        ).fetchall()
         experiments = connection.execute(
             "SELECT kind, status, best_metric, agent_provider FROM experiments"
         ).fetchall()
@@ -128,7 +174,7 @@ def test_run_scaffolds_and_starts_session(
             "SELECT status, exit_code, metric_value, log_path FROM runs"
         ).fetchall()
 
-    assert sessions == [("completed",)]
+    assert sessions == [("completed", "commit-1")]
     assert experiments == [
         ("baseline", "completed", 3.0, None),
         ("candidate", "completed", 3.0, "codex"),
@@ -388,7 +434,9 @@ def test_dashboard_stop_command_reports_missing_server(
 
 
 def test_run_uses_coding_agent_for_candidate_experiments(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_tracking: dict[str, object],
 ) -> None:
     repo_path = tmp_path / "project"
     baseline_results = command_results(
@@ -477,9 +525,13 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             self.prompts.append(prompt)
             self.calls += 1
             text = (
-                "Main idea\n- Improve the metric with a targeted code change.\n\nSteps taken\n- Updated the implementation.\n- Re-ran the evaluation command."
-                if "Summarize this experiment in plain text" in prompt
-                else "working"
+                "Refine evaluation workflow"
+                if "Write a standard git commit message" in prompt
+                else (
+                    "Main idea\n- Improve the metric with a targeted code change.\n\nSteps taken\n- Updated the implementation.\n- Re-ran the evaluation command."
+                    if "Summarize this experiment in plain text" in prompt
+                    else "working"
+                )
             )
             kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
             kwargs["stderr_path"].write_text("", encoding="utf-8")
@@ -509,7 +561,8 @@ def test_run_uses_coding_agent_for_candidate_experiments(
     with sqlite3.connect(db_path(repo_path)) as connection:
         sessions = connection.execute("SELECT status FROM sessions").fetchall()
         experiments = connection.execute(
-            "SELECT kind, status, best_metric, agent_provider, agent_session_id, summary_path, max_runs "
+            "SELECT kind, status, best_metric, previous_best_metric, metric_improved, "
+            "changes_discarded, commit_sha, agent_provider, agent_session_id, summary_path, max_runs "
             "FROM experiments ORDER BY id"
         ).fetchall()
         agent_steps = connection.execute(
@@ -522,21 +575,29 @@ def test_run_uses_coding_agent_for_candidate_experiments(
 
     assert sessions == [("failed",), ("completed",)]
     assert experiments == [
-        ("baseline", "failed", 1.0, None, None, None, 1),
+        ("baseline", "failed", 1.0, None, None, None, None, None, None, None, 1),
         (
             "candidate",
             "failed",
             2.0,
+            1.0,
+            1,
+            0,
+            "commit-2",
             "codex",
             "setup-session",
             ".autoresearch/logs/summaries/experiment-1.md",
             1,
         ),
-        ("baseline", "failed", 2.0, None, None, None, 1),
+        ("baseline", "failed", 2.0, None, None, None, None, None, None, None, 1),
         (
             "candidate",
             "failed",
             2.0,
+            2.0,
+            0,
+            1,
+            None,
             "codex",
             "sess-123",
             ".autoresearch/logs/summaries/experiment-1.md",
@@ -546,6 +607,10 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             "candidate",
             "completed",
             3.0,
+            2.0,
+            1,
+            0,
+            "commit-3",
             "codex",
             "sess-123",
             ".autoresearch/logs/summaries/experiment-2.md",
@@ -560,31 +625,34 @@ def test_run_uses_coding_agent_for_candidate_experiments(
         ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-1-run-2.log"),
         ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-2-run-1.log"),
     ]
-    assert [row[:4] for row in agent_steps[-3:]] == [
+    assert [row[:4] for row in agent_steps[-4:-1]] == [
         (1, "planning", "completed", "sess-123"),
         (1, "execution", "completed", "sess-123"),
         (1, "issue_resolution", "completed", "sess-123"),
     ]
-    assert agent_steps[-4][:4] == (0, "initial_planning", "completed", "sess-123")
-    assert "Experiment 2, initial planning." in agent_steps[-4][4]
-    assert "template marker" in agent_steps[-4][4]
+    assert agent_steps[-1][:4] == (1, "commit_message", "completed", "sess-123")
+    assert agent_steps[-5][:4] == (0, "initial_planning", "completed", "sess-123")
+    assert "Experiment 2, initial planning." in agent_steps[-5][4]
+    assert "template marker" in agent_steps[-5][4]
     assert (
         "Start by carefully reading all summary markdown files under `.autoresearch/logs/summaries`."
-        in agent_steps[-4][4]
+        in agent_steps[-5][4]
     )
-    assert "- Run stdout logs: `.autoresearch/logs/runs`" in agent_steps[-4][4]
-    assert "- Agent transcripts: `.autoresearch/logs/agent`" in agent_steps[-4][4]
+    assert "- Run stdout logs: `.autoresearch/logs/runs`" in agent_steps[-5][4]
+    assert "- Agent transcripts: `.autoresearch/logs/agent`" in agent_steps[-5][4]
     assert (
-        "- Agent stderr logs: `.autoresearch/logs/agent-stderr`" in agent_steps[-4][4]
+        "- Agent stderr logs: `.autoresearch/logs/agent-stderr`" in agent_steps[-5][4]
     )
-    assert "- SQLite state database: `.autoresearch/state.db`" in agent_steps[-4][4]
-    assert all("Experiment 2, attempt 1, phase:" in row[4] for row in agent_steps[-3:])
-    assert all(row[5] == "working" for row in agent_steps[-3:])
-    assert agent_steps[-4][5] == "working"
-    assert agent_steps[-4][6].endswith("logs/agent/experiment-2.initial_planning.jsonl")
-    assert agent_steps[-3][6].endswith("logs/agent/experiment-2-run-1.planning.jsonl")
-    assert agent_steps[-2][6].endswith("logs/agent/experiment-2-run-1.execution.jsonl")
-    assert agent_steps[-1][6].endswith(
+    assert "- SQLite state database: `.autoresearch/state.db`" in agent_steps[-5][4]
+    assert all(
+        "Experiment 2, attempt 1, phase:" in row[4] for row in agent_steps[-4:-1]
+    )
+    assert all(row[5] == "working" for row in agent_steps[-4:-1])
+    assert agent_steps[-5][5] == "working"
+    assert agent_steps[-5][6].endswith("logs/agent/experiment-2.initial_planning.jsonl")
+    assert agent_steps[-4][6].endswith("logs/agent/experiment-2-run-1.planning.jsonl")
+    assert agent_steps[-3][6].endswith("logs/agent/experiment-2-run-1.execution.jsonl")
+    assert agent_steps[-2][6].endswith(
         "logs/agent/experiment-2-run-1.issue_resolution.jsonl"
     )
     summary_text = (
@@ -593,8 +661,17 @@ def test_run_uses_coding_agent_for_candidate_experiments(
     assert "Main idea" in summary_text
     assert "Steps taken" in summary_text
     assert "Resulting metric: 3.0" in summary_text
-    assert fake_agent.calls == 13
+    assert "Previous best metric: 2.0" in summary_text
+    assert "Metric improved: yes" in summary_text
+    assert "Changes discarded: no" in summary_text
+    assert fake_agent.calls == 14
     assert sum("template marker" in prompt for prompt in fake_agent.prompts) == 2
+    assert "Previous best metric: 2.0." in agent_steps[-5][4]
+    assert fake_git_tracking["commit_messages"] == [
+        "setup",
+        "setup",
+        "Refine evaluation workflow",
+    ]
 
 
 def test_scaffolded_codex_system_prompt_is_empty(tmp_path: Path) -> None:
@@ -716,6 +793,145 @@ def test_run_skips_repo_command_when_agent_phase_fails(
         ("execution", "failed", 1, "execution failed", "boom\n"),
     ]
     assert runs[-1] == ("failed", 1, None)
+
+
+def test_non_improving_experiment_summary_marks_discarded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_tracking: dict[str, object],
+) -> None:
+    repo_path = tmp_path / "project"
+    baseline_results = command_results(
+        CommandResult(
+            command="baseline",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(baseline_results),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    responses = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    main(["--headless", str(repo_path)])
+    write_config_updates(
+        repo_path,
+        run="python -c \"print('metric: 1.5')\"",
+        metric_pattern=r"^metric:\s+([\d.]+)",
+        max_experiments=1,
+        max_runs_per_experiment=1,
+    )
+
+    evaluation_results = command_results(
+        CommandResult(
+            command="run",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
+        CommandResult(
+            command="run",
+            exit_code=1,
+            stdout="metric: 1.5\n",
+            stderr="",
+            status="failed",
+            metric_value=1.5,
+        ),
+    )
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.session_id = "sess-789"
+
+        def run(self, prompt: str, **kwargs) -> AgentRunResult:
+            text = (
+                "Main idea\n- Try a weaker variant.\n\nSteps taken\n- Adjusted the experiment."
+                if "Summarize this experiment in plain text" in prompt
+                else "working"
+            )
+            kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
+            kwargs["stderr_path"].write_text("", encoding="utf-8")
+            return AgentRunResult(
+                exit_code=0,
+                output_path=kwargs["output_path"],
+                stderr_path=kwargs["stderr_path"],
+                session_id=self.session_id,
+                text=text,
+                stderr="",
+            )
+
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent", lambda config, repo_path: FakeAgent()
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(evaluation_results),
+    )
+    responses = iter(["c", "y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+
+    exit_code = main(["--headless", str(repo_path)])
+
+    assert exit_code == 1
+    summary_text = (
+        repo_path / ".autoresearch" / "logs" / "summaries" / "experiment-1.md"
+    ).read_text(encoding="utf-8")
+    assert "Resulting metric: 1.5" in summary_text
+    assert "Previous best metric: 2.0" in summary_text
+    assert "Metric improved: no" in summary_text
+    assert "Changes discarded: yes" in summary_text
+    assert fake_git_tracking["commit_messages"] == ["setup"]
+    with sqlite3.connect(db_path(repo_path)) as connection:
+        experiment = connection.execute(
+            "SELECT previous_best_metric, metric_improved, changes_discarded, commit_sha "
+            "FROM experiments ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert experiment == (2.0, 0, 1, None)
+
+
+def test_run_session_fails_fast_for_dirty_git_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path = tmp_path / "project"
+
+    def failing_tracking_check(_: Path) -> None:
+        raise GitWorktreeError(
+            "Autoresearch requires a clean git worktree before starting."
+        )
+
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.ensure_clean_tracking",
+        failing_tracking_check,
+    )
+    responses = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+
+    exit_code = main(["--headless", str(repo_path)])
+
+    assert exit_code == 1
+    assert not db_path(repo_path).exists()
 
 
 def test_run_overwrites_existing_setup(

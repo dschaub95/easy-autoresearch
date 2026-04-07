@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     repo_path TEXT NOT NULL,
     max_duration_seconds INTEGER NOT NULL,
     status TEXT NOT NULL,
+    setup_commit_sha TEXT,
     started_at TEXT NOT NULL,
     finished_at TEXT,
     created_at TEXT NOT NULL
@@ -28,8 +29,13 @@ CREATE TABLE IF NOT EXISTS experiments (
     max_runs INTEGER NOT NULL,
     status TEXT NOT NULL,
     best_metric REAL,
+    previous_best_metric REAL,
+    metric_improved INTEGER,
+    changes_discarded INTEGER,
     agent_provider TEXT,
     agent_session_id TEXT,
+    commit_sha TEXT,
+    base_commit_sha TEXT,
     summary TEXT,
     summary_path TEXT,
     agent_log_path TEXT,
@@ -93,8 +99,14 @@ def initialize_database(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as connection:
         connection.executescript(SCHEMA)
+        ensure_column(connection, "sessions", "setup_commit_sha", "TEXT")
         ensure_column(connection, "experiments", "agent_provider", "TEXT")
         ensure_column(connection, "experiments", "agent_session_id", "TEXT")
+        ensure_column(connection, "experiments", "previous_best_metric", "REAL")
+        ensure_column(connection, "experiments", "metric_improved", "INTEGER")
+        ensure_column(connection, "experiments", "changes_discarded", "INTEGER")
+        ensure_column(connection, "experiments", "commit_sha", "TEXT")
+        ensure_column(connection, "experiments", "base_commit_sha", "TEXT")
         ensure_column(connection, "experiments", "summary", "TEXT")
         ensure_column(connection, "experiments", "summary_path", "TEXT")
         ensure_column(connection, "experiments", "agent_log_path", "TEXT")

@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,11 +29,23 @@ from .config import (
     state_dir,
     write_config,
 )
+from .git import (
+    GitWorktreeError,
+    commit_all_changes,
+    current_head_sha,
+    discard_uncommitted_changes,
+    ensure_clean_tracking,
+    has_uncommitted_changes,
+    restore_worktree_snapshot,
+    save_worktree_snapshot,
+)
 from .prompts import (
     CODEX_SYSTEM_PROMPT,
     build_agent_phase_prompt,
+    build_commit_message_prompt,
     build_experiment_summary,
     build_initial_planning_prompt,
+    build_setup_commit_message_prompt,
     build_setup_prompt,
     build_summary_prompt,
 )
@@ -66,7 +79,7 @@ class CommandResult:
 
 AgentPhase = Literal["planning", "execution", "issue_resolution"]
 AgentStepPhase = Literal[
-    "initial_planning", "planning", "execution", "issue_resolution"
+    "initial_planning", "planning", "execution", "issue_resolution", "commit_message"
 ]
 
 
@@ -81,6 +94,17 @@ class AgentPhaseResult:
     response_text: str
     stderr: str
     agent_session_id: str | None
+
+
+@dataclass(slots=True)
+class ExperimentResult:
+    status: str
+    best_metric: float | None
+    run_count: int
+    previous_best_metric: float | None = None
+    metric_improved: bool = False
+    changes_discarded: bool = False
+    commit_sha: str | None = None
 
 
 def create_agent(config: AutoResearchConfig, repo_path: Path) -> CodingAgent:
@@ -119,6 +143,7 @@ class AutoResearch:
         self.server_port = server_port
         self.dashboard_server: DashboardServer | None = None
         self.did_scaffold = False
+        self.setup_commit_sha: str | None = None
 
     def scaffold_repo(self) -> None:
         self.repo_path.mkdir(parents=True, exist_ok=True)
@@ -176,7 +201,8 @@ class AutoResearch:
     def prepare_repo_setup(self) -> None:
         if not self.did_scaffold or not self.ready_to_start:
             return
-        result = create_agent(self.require_config(), self.repo_path).run(
+        agent = create_agent(self.require_config(), self.repo_path)
+        result = agent.run(
             self.build_setup_prompt(),
             output_path=self.setup_logs_dir / "setup.agent.jsonl",
             stderr_path=self.setup_logs_dir / "setup.agent.stderr.log",
@@ -189,6 +215,26 @@ class AutoResearch:
                 f"{result.stderr_path.relative_to(self.repo_path)}."
             )
         self.config = load_config(self.repo_path)
+        if not has_uncommitted_changes(self.repo_path):
+            return
+        commit_message_result = agent.run(
+            build_setup_commit_message_prompt(),
+            output_path=self.setup_logs_dir / "setup.commit_message.jsonl",
+            stderr_path=self.setup_logs_dir / "setup.commit_message.stderr.log",
+            timeout_seconds=self.require_config().session.max_duration_seconds,
+        )
+        if (
+            commit_message_result.exit_code != 0
+            or not commit_message_result.text.strip()
+        ):
+            raise RuntimeError(
+                "Agent setup commit message generation failed. Check "
+                f"{commit_message_result.output_path.relative_to(self.repo_path)} and "
+                f"{commit_message_result.stderr_path.relative_to(self.repo_path)}."
+            )
+        self.setup_commit_sha = commit_all_changes(
+            self.repo_path, commit_message_result.text.strip()
+        )
 
     def review_prepared_setup_if_needed(self) -> None:
         if (
@@ -271,6 +317,7 @@ class AutoResearch:
                 repo_path=str(self.repo_path),
                 max_duration_seconds=config.session.max_duration_seconds,
                 status="running",
+                setup_commit_sha=self.setup_commit_sha,
                 started_at=started_at,
                 created_at=started_at,
             )
@@ -292,14 +339,15 @@ class AutoResearch:
                 created_at=baseline_started_at,
                 updated_at=baseline_started_at,
             )
-            baseline_status, _, baseline_run_count = self.run_baseline_experiment(
+            baseline_result = self.run_baseline_experiment(
                 connection,
                 experiment_id=baseline_experiment_id,
                 experiment_index=1,
             )
-            total_run_count += baseline_run_count
+            session_best_metric = baseline_result.best_metric
+            total_run_count += baseline_result.run_count
             if (
-                baseline_status == "completed"
+                baseline_result.status == "completed"
                 and config.experiments.max_experiments == 0
             ):
                 session_status = "completed"
@@ -307,6 +355,7 @@ class AutoResearch:
             for experiment_index in range(1, config.experiments.max_experiments + 1):
                 experiment_count += 1
                 experiment_started_at = utc_now()
+                base_commit_sha = current_head_sha(self.repo_path)
                 experiment_id = create_experiment(
                     connection,
                     session_id=session_id,
@@ -315,17 +364,23 @@ class AutoResearch:
                     max_runs=config.experiments.max_runs_per_experiment,
                     status="running",
                     agent_provider=config.agent.provider,
+                    previous_best_metric=session_best_metric,
+                    base_commit_sha=base_commit_sha,
                     created_at=experiment_started_at,
                     updated_at=experiment_started_at,
                 )
                 print(f"Running candidate experiment {experiment_index}")
-                experiment_status, _, run_count = self.run_agent_experiment(
+                experiment_result = self.run_agent_experiment(
                     connection,
                     experiment_id=experiment_id,
                     experiment_index=experiment_index,
+                    previous_best_metric=session_best_metric,
+                    base_commit_sha=base_commit_sha,
                 )
-                total_run_count += run_count
-                if experiment_status == "completed":
+                total_run_count += experiment_result.run_count
+                if experiment_result.metric_improved:
+                    session_best_metric = experiment_result.best_metric
+                if experiment_result.status == "completed":
                     session_status = "completed"
                     break
 
@@ -348,7 +403,7 @@ class AutoResearch:
         *,
         experiment_id: int,
         experiment_index: int,
-    ) -> tuple[str, float | None, int]:
+    ) -> ExperimentResult:
         config = self.require_config()
         run_index = 1
         print("Baseline run 1/1")
@@ -389,7 +444,11 @@ class AutoResearch:
             updated_at=utc_now(),
             best_metric=result.metric_value,
         )
-        return result.status, result.metric_value, 1
+        return ExperimentResult(
+            status=result.status,
+            best_metric=result.metric_value,
+            run_count=1,
+        )
 
     def run_agent_experiment(
         self,
@@ -397,13 +456,16 @@ class AutoResearch:
         *,
         experiment_id: int,
         experiment_index: int,
-    ) -> tuple[str, float | None, int]:
+        previous_best_metric: float | None,
+        base_commit_sha: str,
+    ) -> ExperimentResult:
         config = self.require_config()
         agent = create_agent(config, self.repo_path)
         template = self.load_prompt_template()
         best_metric: float | None = None
         experiment_status = "failed"
         run_count = 0
+        best_result: CommandResult | None = None
         last_agent_log_path: Path | None = None
         last_agent_stderr_path: Path | None = None
         last_result: CommandResult | None = None
@@ -413,6 +475,7 @@ class AutoResearch:
             template=template,
             experiment_id=experiment_id,
             experiment_index=experiment_index,
+            previous_best_metric=previous_best_metric,
         )
         if initial_planning_result is not None:
             last_agent_log_path = initial_planning_result.log_path
@@ -421,13 +484,18 @@ class AutoResearch:
             initial_planning_result is not None
             and initial_planning_result.status != "completed"
         ):
+            discard_uncommitted_changes(self.repo_path)
             update_experiment(
                 connection,
                 experiment_id=experiment_id,
                 status=experiment_status,
                 updated_at=utc_now(),
                 best_metric=best_metric,
+                previous_best_metric=previous_best_metric,
+                metric_improved=False,
+                changes_discarded=True,
                 agent_session_id=agent.session_id,
+                base_commit_sha=base_commit_sha,
                 agent_log_path=(
                     str(last_agent_log_path.relative_to(self.repo_path))
                     if last_agent_log_path is not None
@@ -439,137 +507,181 @@ class AutoResearch:
                     else None
                 ),
             )
-            return experiment_status, best_metric, run_count
-        for run_index in range(1, config.experiments.max_runs_per_experiment + 1):
-            run_count += 1
-            run_started_at = utc_now()
-            run_id = create_run(
-                connection,
-                experiment_id=experiment_id,
-                run_index=run_index,
-                command=config.commands.run,
-                status="running",
-                started_at=run_started_at,
-                created_at=run_started_at,
+            return ExperimentResult(
+                status=experiment_status,
+                best_metric=best_metric,
+                run_count=run_count,
+                previous_best_metric=previous_best_metric,
+                metric_improved=False,
+                changes_discarded=True,
             )
-            print(
-                f"Candidate run {run_index}/{config.experiments.max_runs_per_experiment}"
-            )
-            phase_results = self.run_agent_phases(
-                connection,
-                agent=agent,
-                experiment_id=experiment_id,
-                experiment_index=experiment_index,
-                run_index=run_index,
-            )
-            if phase_results:
-                last_agent_log_path = phase_results[-1].log_path
-                last_agent_stderr_path = phase_results[-1].stderr_path
-            if not phase_results or any(
-                phase_result.status != "completed" for phase_result in phase_results
-            ):
+        with tempfile.TemporaryDirectory(
+            prefix="experiment-", dir=self.state_dir
+        ) as tmp:
+            best_snapshot_dir = Path(tmp) / "best"
+            for run_index in range(1, config.experiments.max_runs_per_experiment + 1):
+                if run_index > 1:
+                    if best_snapshot_dir.exists():
+                        restore_worktree_snapshot(self.repo_path, best_snapshot_dir)
+                    else:
+                        discard_uncommitted_changes(self.repo_path)
+                run_count += 1
+                run_started_at = utc_now()
+                run_id = create_run(
+                    connection,
+                    experiment_id=experiment_id,
+                    run_index=run_index,
+                    command=config.commands.run,
+                    status="running",
+                    started_at=run_started_at,
+                    created_at=run_started_at,
+                )
+                print(
+                    f"Candidate run {run_index}/{config.experiments.max_runs_per_experiment}"
+                )
+                phase_results = self.run_agent_phases(
+                    connection,
+                    agent=agent,
+                    experiment_id=experiment_id,
+                    experiment_index=experiment_index,
+                    run_index=run_index,
+                )
+                if phase_results:
+                    last_agent_log_path = phase_results[-1].log_path
+                    last_agent_stderr_path = phase_results[-1].stderr_path
+                if not phase_results or any(
+                    phase_result.status != "completed" for phase_result in phase_results
+                ):
+                    finish_run(
+                        connection,
+                        run_id=run_id,
+                        status="failed",
+                        exit_code=(
+                            next(
+                                (
+                                    phase_result.exit_code
+                                    for phase_result in phase_results
+                                    if phase_result.status != "completed"
+                                ),
+                                1,
+                            )
+                            if phase_results
+                            else 1
+                        ),
+                        stdout="\n\n".join(
+                            phase_result.response_text
+                            for phase_result in phase_results
+                            if phase_result.response_text
+                        ),
+                        stderr="\n\n".join(
+                            phase_result.stderr
+                            for phase_result in phase_results
+                            if phase_result.stderr
+                        ),
+                        metric_value=None,
+                        log_path=(
+                            str(last_agent_log_path.relative_to(self.repo_path))
+                            if last_agent_log_path is not None
+                            else None
+                        ),
+                        finished_at=utc_now(),
+                    )
+                    continue
+
+                result = run_command(
+                    config.commands.run,
+                    cwd=self.repo_path,
+                    timeout_seconds=config.session.max_duration_seconds,
+                    metric_pattern=config.commands.metric_pattern,
+                )
+                print("Evaluation finished")
+                if result.metric_value is None:
+                    result = CommandResult(
+                        command=result.command,
+                        exit_code=result.exit_code,
+                        stdout=result.stdout,
+                        stderr=(
+                            f"{result.stderr}\nNo metric matched pattern "
+                            f"{config.commands.metric_pattern!r}."
+                        ).strip(),
+                        status="failed",
+                        metric_value=None,
+                    )
+                last_result = result
+                run_log_path = self.run_log_path(experiment_index, run_index)
+                run_log_path.write_text(result.stdout, encoding="utf-8")
                 finish_run(
                     connection,
                     run_id=run_id,
-                    status="failed",
-                    exit_code=(
-                        next(
-                            (
-                                phase_result.exit_code
-                                for phase_result in phase_results
-                                if phase_result.status != "completed"
-                            ),
-                            1,
-                        )
-                        if phase_results
-                        else 1
-                    ),
-                    stdout="\n\n".join(
-                        phase_result.response_text
-                        for phase_result in phase_results
-                        if phase_result.response_text
-                    ),
-                    stderr="\n\n".join(
-                        phase_result.stderr
-                        for phase_result in phase_results
-                        if phase_result.stderr
-                    ),
-                    metric_value=None,
-                    log_path=(
-                        str(last_agent_log_path.relative_to(self.repo_path))
-                        if last_agent_log_path is not None
-                        else None
-                    ),
-                    finished_at=utc_now(),
-                )
-                continue
-
-            result = run_command(
-                config.commands.run,
-                cwd=self.repo_path,
-                timeout_seconds=config.session.max_duration_seconds,
-                metric_pattern=config.commands.metric_pattern,
-            )
-            print("Evaluation finished")
-            if result.metric_value is None:
-                result = CommandResult(
-                    command=result.command,
+                    status=result.status,
                     exit_code=result.exit_code,
                     stdout=result.stdout,
-                    stderr=(
-                        f"{result.stderr}\nNo metric matched pattern "
-                        f"{config.commands.metric_pattern!r}."
-                    ).strip(),
-                    status="failed",
-                    metric_value=None,
+                    stderr=result.stderr,
+                    metric_value=result.metric_value,
+                    log_path=str(run_log_path.relative_to(self.repo_path)),
+                    finished_at=utc_now(),
                 )
-            last_result = result
-            run_log_path = self.run_log_path(experiment_index, run_index)
-            run_log_path.write_text(result.stdout, encoding="utf-8")
-            finish_run(
-                connection,
-                run_id=run_id,
-                status=result.status,
-                exit_code=result.exit_code,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                metric_value=result.metric_value,
-                log_path=str(run_log_path.relative_to(self.repo_path)),
-                finished_at=utc_now(),
-            )
-            if result.metric_value is not None and (
-                best_metric is None or result.metric_value > best_metric
-            ):
-                best_metric = result.metric_value
-            if result.status == "completed":
-                experiment_status = "completed"
-                break
+                if metric_improved(result.metric_value, best_metric):
+                    best_metric = result.metric_value
+                    best_result = result
+                    save_worktree_snapshot(self.repo_path, best_snapshot_dir)
+                if result.status == "completed":
+                    experiment_status = "completed"
+                    break
 
-        summary_text: str | None = None
-        summary_path: Path | None = None
-        print(f"Writing summary for experiment {experiment_index}")
-        if agent.session_id:
-            summary_path = self.summary_path_for_experiment(experiment_index)
-            summary_output_path, summary_stderr_path = self.agent_artifact_paths(
-                f"experiment-{experiment_index}.summary"
-            )
-            summary_result = agent.run(
-                self.build_summary_prompt(last_result),
-                output_path=summary_output_path,
-                stderr_path=summary_stderr_path,
-                timeout_seconds=config.session.max_duration_seconds,
-            )
-            summary_text = self.build_experiment_summary(
-                summary_result.text, last_result
-            )
-            summary_path.write_text(summary_text, encoding="utf-8")
+            metric_did_improve = metric_improved(best_metric, previous_best_metric)
+            if metric_did_improve and best_snapshot_dir.exists():
+                restore_worktree_snapshot(self.repo_path, best_snapshot_dir)
+
+            summary_text: str | None = None
+            summary_path: Path | None = None
+            summary_source_result = best_result if metric_did_improve else last_result
+            print(f"Writing summary for experiment {experiment_index}")
+            if agent.session_id:
+                summary_path = self.summary_path_for_experiment(experiment_index)
+                summary_output_path, summary_stderr_path = self.agent_artifact_paths(
+                    f"experiment-{experiment_index}.summary"
+                )
+                summary_result = agent.run(
+                    self.build_summary_prompt(summary_source_result),
+                    output_path=summary_output_path,
+                    stderr_path=summary_stderr_path,
+                    timeout_seconds=config.session.max_duration_seconds,
+                )
+                summary_text = self.build_experiment_summary(
+                    summary_result.text,
+                    summary_source_result,
+                    previous_best_metric=previous_best_metric,
+                    metric_improved=metric_did_improve,
+                    changes_discarded=not metric_did_improve,
+                )
+                summary_path.write_text(summary_text, encoding="utf-8")
+
+            commit_sha: str | None = None
+            if metric_did_improve:
+                commit_message = self.run_commit_message_step(
+                    connection,
+                    agent=agent,
+                    experiment_id=experiment_id,
+                    experiment_index=experiment_index,
+                    run_index=run_count,
+                )
+                commit_sha = commit_all_changes(self.repo_path, commit_message)
+            else:
+                discard_uncommitted_changes(self.repo_path)
+
         update_experiment(
             connection,
             experiment_id=experiment_id,
             status=experiment_status,
             updated_at=utc_now(),
             best_metric=best_metric,
+            previous_best_metric=previous_best_metric,
+            metric_improved=metric_did_improve,
+            changes_discarded=not metric_did_improve,
             agent_session_id=agent.session_id,
+            commit_sha=commit_sha,
+            base_commit_sha=base_commit_sha,
             summary=summary_text,
             summary_path=(
                 str(summary_path.relative_to(self.repo_path))
@@ -587,7 +699,15 @@ class AutoResearch:
                 else None
             ),
         )
-        return experiment_status, best_metric, run_count
+        return ExperimentResult(
+            status=experiment_status,
+            best_metric=best_metric,
+            run_count=run_count,
+            previous_best_metric=previous_best_metric,
+            metric_improved=metric_did_improve,
+            changes_discarded=not metric_did_improve,
+            commit_sha=commit_sha,
+        )
 
     def run_initial_planning_step(
         self,
@@ -597,11 +717,13 @@ class AutoResearch:
         template: str,
         experiment_id: int,
         experiment_index: int,
+        previous_best_metric: float | None,
     ) -> AgentPhaseResult | None:
         print("Agent phase: initial_planning")
         prompt = self.build_initial_planning_prompt(
             template=template,
             experiment_index=experiment_index,
+            previous_best_metric=previous_best_metric,
         )
         started_at = utc_now()
         step_id = create_agent_step(
@@ -712,6 +834,55 @@ class AutoResearch:
                 break
         return phase_results
 
+    def run_commit_message_step(
+        self,
+        connection,
+        *,
+        agent: CodingAgent,
+        experiment_id: int,
+        experiment_index: int,
+        run_index: int,
+    ) -> str:
+        print("Agent phase: commit_message")
+        prompt = build_commit_message_prompt()
+        started_at = utc_now()
+        step_id = create_agent_step(
+            connection,
+            experiment_id=experiment_id,
+            run_index=run_index,
+            phase="commit_message",
+            prompt=prompt,
+            status="running",
+            started_at=started_at,
+            created_at=started_at,
+        )
+        output_path, stderr_path = self.agent_artifact_paths(
+            f"experiment-{experiment_index}.commit_message"
+        )
+        result = agent.run(
+            prompt,
+            output_path=output_path,
+            stderr_path=stderr_path,
+            timeout_seconds=self.require_config().session.max_duration_seconds,
+        )
+        status = "completed" if result.exit_code == 0 else "failed"
+        finish_agent_step(
+            connection,
+            step_id=step_id,
+            status=status,
+            exit_code=result.exit_code,
+            agent_session_id=result.session_id,
+            response_text=result.text,
+            stderr=result.stderr,
+            log_path=str(output_path.relative_to(self.repo_path)),
+            stderr_path=str(stderr_path.relative_to(self.repo_path)),
+            finished_at=utc_now(),
+        )
+        commit_message = result.text.strip()
+        if status != "completed" or not commit_message:
+            raise RuntimeError("Agent failed to produce a commit message.")
+        return commit_message
+
     def build_agent_phase_prompt(
         self,
         experiment_index: int,
@@ -731,6 +902,7 @@ class AutoResearch:
         *,
         template: str | None,
         experiment_index: int,
+        previous_best_metric: float | None,
     ) -> str:
         config = self.require_config()
         return build_initial_planning_prompt(
@@ -744,6 +916,7 @@ class AutoResearch:
                 self.agent_stderr_logs_dir.relative_to(self.repo_path)
             ),
             database_path=str(self.database_path.relative_to(self.repo_path)),
+            previous_best_metric=previous_best_metric,
         )
 
     def build_setup_prompt(self) -> str:
@@ -753,9 +926,21 @@ class AutoResearch:
         return build_summary_prompt(result)
 
     def build_experiment_summary(
-        self, summary: str, result: CommandResult | None
+        self,
+        summary: str,
+        result: CommandResult | None,
+        *,
+        previous_best_metric: float | None,
+        metric_improved: bool,
+        changes_discarded: bool,
     ) -> str:
-        return build_experiment_summary(summary, result)
+        return build_experiment_summary(
+            summary,
+            result,
+            previous_best_metric=previous_best_metric,
+            metric_improved=metric_improved,
+            changes_discarded=changes_discarded,
+        )
 
     def load_prompt_template(self) -> str:
         prompt_path = self.repo_path / self.require_config().agent.prompt_template
@@ -784,6 +969,14 @@ def parse_metric(output: str, pattern: str | None) -> float | None:
     if match is None:
         return None
     return float(match.group(1))
+
+
+def metric_improved(candidate: float | None, reference: float | None) -> bool:
+    if candidate is None:
+        return False
+    if reference is None:
+        return True
+    return candidate > reference
 
 
 def run_command(
@@ -995,13 +1188,17 @@ def main(argv: list[str] | None = None) -> int:
         server_port=args.server_port,
     )
     autoresearch.resolve_setup_state(overwrite=args.overwrite)
-    autoresearch.scaffold_if_needed()
-    autoresearch.start_dashboard()
     try:
+        ensure_clean_tracking(autoresearch.repo_path)
+        autoresearch.scaffold_if_needed()
+        autoresearch.start_dashboard()
         autoresearch.review_scaffold_if_needed()
         autoresearch.prepare_repo_setup()
         autoresearch.review_prepared_setup_if_needed()
         return autoresearch.run_session()
+    except GitWorktreeError as error:
+        print(error)
+        return 1
     finally:
         try:
             autoresearch.stop_dashboard()

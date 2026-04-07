@@ -50,6 +50,7 @@ def build_initial_planning_prompt(
     agent_logs_dir: str,
     agent_stderr_logs_dir: str,
     database_path: str,
+    previous_best_metric: float | None,
 ) -> str:
     return "\n\n".join(
         part
@@ -62,6 +63,7 @@ def build_initial_planning_prompt(
             ),
             f"Start by carefully reading all summary markdown files under `{summary_dir}`.",
             f"The evaluation command is `{evaluation_command}`.",
+            f"Previous best metric: {format_metric(previous_best_metric)}.",
             (
                 "Use web search and relevant scientific or technical literature when "
                 "it would materially improve the idea selection."
@@ -131,10 +133,37 @@ def build_summary_prompt(result: CommandResult | None) -> str:
     )
 
 
-def build_experiment_summary(summary: str, result: CommandResult | None) -> str:
+def format_metric(metric_value: float | None) -> str:
+    return str(metric_value) if metric_value is not None else "n/a"
+
+
+def build_experiment_summary(
+    summary: str,
+    result: CommandResult | None,
+    *,
+    previous_best_metric: float | None,
+    metric_improved: bool,
+    changes_discarded: bool,
+) -> str:
     base_summary = summary.strip()
-    metric_value = result.metric_value if result is not None else None
-    metric_text = metric_value if metric_value is not None else "n/a"
+    metric_text = format_metric(result.metric_value if result is not None else None)
+    previous_best_metric_text = format_metric(previous_best_metric)
+    footer = "\n".join(
+        [
+            f"Resulting metric: {metric_text}",
+            f"Previous best metric: {previous_best_metric_text}",
+            f"Metric improved: {'yes' if metric_improved else 'no'}",
+            f"Changes discarded: {'yes' if changes_discarded else 'no'}",
+        ]
+    )
     if not base_summary:
-        return f"Resulting metric: {metric_text}"
-    return f"{base_summary}\n\nResulting metric: {metric_text}"
+        return footer
+    return f"{base_summary}\n\n{footer}"
+
+
+def build_commit_message_prompt() -> str:
+    return "Write a standard git commit message for the changes from this experiment."
+
+
+def build_setup_commit_message_prompt() -> str:
+    return "Write a standard git commit message for the setup changes made in this repository."
