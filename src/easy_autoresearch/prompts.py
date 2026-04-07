@@ -16,7 +16,9 @@ AGENT_PHASE_INSTRUCTIONS: dict[AgentPhase, str] = {
         "Inspect the codebase and produce a concise implementation plan for "
         "the most promising change to make this experiment a success. Do not edit files yet."
     ),
-    "execution": ("Implement the planned changes. "),
+    "execution": (
+        "Implement the planned changes. Try to keep the changes minimal, while balancing for maintainability. "
+    ),
     "issue_resolution": (
         "Review the changes for likely issues, fix anything necessary, and "
         "ensure the run command as defined in autoresearch.yaml still works. "
