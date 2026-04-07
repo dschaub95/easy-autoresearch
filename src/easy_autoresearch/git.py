@@ -7,7 +7,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
-STATE_DIR_PATHSPEC = ":(exclude).autoresearch"
+EXCLUDED_PATHSPECS = (
+    ":(exclude).autoresearch",
+    ":(exclude).codex/autoresearch.yaml",
+)
 
 
 class GitWorktreeError(RuntimeError):
@@ -32,7 +35,7 @@ def _run_git(
 
 
 def _managed_pathspecs() -> list[str]:
-    return ["--", ".", STATE_DIR_PATHSPEC]
+    return ["--", ".", *EXCLUDED_PATHSPECS]
 
 
 def ensure_clean_tracking(repo_path: Path) -> None:
