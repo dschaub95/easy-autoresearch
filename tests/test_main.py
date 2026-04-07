@@ -48,7 +48,11 @@ class NoOpSetupAgent:
         self.session_id = session_id
 
     def run(self, prompt: str, **kwargs) -> AgentRunResult:
-        repo_path = kwargs["output_path"].parents[2]
+        repo_path = next(
+            parent
+            for parent in kwargs["output_path"].parents
+            if (parent / CONFIG_FILENAME).exists()
+        )
         config_file = repo_path / CONFIG_FILENAME
         if config_file.exists():
             config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
@@ -130,8 +134,8 @@ def test_run_scaffolds_and_starts_session(
         ("candidate", "completed", 3.0, "codex"),
     ]
     assert runs == [
-        ("completed", 0, 3.0, ".autoresearch/experiment-1-run-1.log"),
-        ("completed", 0, 3.0, ".autoresearch/experiment-1-run-1.log"),
+        ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
+        ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
     ]
 
 
@@ -473,7 +477,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             self.prompts.append(prompt)
             self.calls += 1
             text = (
-                "Hypothesis\nImprove the metric.\n\nApproach\nMake a change.\n\nFindings\nMetric improved."
+                "Main idea\n- Improve the metric with a targeted code change.\n\nSteps taken\n- Updated the implementation.\n- Re-ran the evaluation command."
                 if "Summarize this experiment in plain text" in prompt
                 else "working"
             )
@@ -525,7 +529,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             2.0,
             "codex",
             "setup-session",
-            ".autoresearch/logs/experiment-1-summary.md",
+            ".autoresearch/logs/summaries/experiment-1.md",
             1,
         ),
         ("baseline", "failed", 2.0, None, None, None, 1),
@@ -535,7 +539,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             2.0,
             "codex",
             "sess-123",
-            ".autoresearch/logs/experiment-1-summary.md",
+            ".autoresearch/logs/summaries/experiment-1.md",
             2,
         ),
         (
@@ -544,17 +548,17 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             3.0,
             "codex",
             "sess-123",
-            ".autoresearch/logs/experiment-2-summary.md",
+            ".autoresearch/logs/summaries/experiment-2.md",
             2,
         ),
     ]
     assert runs == [
-        ("failed", 1, 1.0, ".autoresearch/experiment-1-run-1.log"),
-        ("failed", 1, 2.0, ".autoresearch/experiment-1-run-1.log"),
-        ("failed", 1, 2.0, ".autoresearch/experiment-1-run-1.log"),
-        ("failed", 1, 1.0, ".autoresearch/experiment-1-run-1.log"),
-        ("failed", 1, 2.0, ".autoresearch/experiment-1-run-2.log"),
-        ("completed", 0, 3.0, ".autoresearch/experiment-2-run-1.log"),
+        ("failed", 1, 1.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
+        ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
+        ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
+        ("failed", 1, 1.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
+        ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-1-run-2.log"),
+        ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-2-run-1.log"),
     ]
     assert [row[:4] for row in agent_steps[-3:]] == [
         (1, "planning", "completed", "sess-123"),
@@ -564,20 +568,31 @@ def test_run_uses_coding_agent_for_candidate_experiments(
     assert agent_steps[-4][:4] == (0, "initial_planning", "completed", "sess-123")
     assert "Experiment 2, initial planning." in agent_steps[-4][4]
     assert "template marker" in agent_steps[-4][4]
-    assert "Candidate experiment 1" in agent_steps[-4][4]
-    assert "Metric: 2.0" in agent_steps[-4][4]
+    assert (
+        "Start by carefully reading all summary markdown files under `.autoresearch/logs/summaries`."
+        in agent_steps[-4][4]
+    )
+    assert "- Run stdout logs: `.autoresearch/logs/runs`" in agent_steps[-4][4]
+    assert "- Agent transcripts: `.autoresearch/logs/agent`" in agent_steps[-4][4]
+    assert (
+        "- Agent stderr logs: `.autoresearch/logs/agent-stderr`" in agent_steps[-4][4]
+    )
+    assert "- SQLite state database: `.autoresearch/state.db`" in agent_steps[-4][4]
     assert all("Experiment 2, attempt 1, phase:" in row[4] for row in agent_steps[-3:])
     assert all(row[5] == "working" for row in agent_steps[-3:])
     assert agent_steps[-4][5] == "working"
-    assert agent_steps[-4][6].endswith("experiment-2.initial_planning.agent.jsonl")
-    assert agent_steps[-3][6].endswith("experiment-2-run-1.planning.agent.jsonl")
-    assert agent_steps[-2][6].endswith("experiment-2-run-1.execution.agent.jsonl")
+    assert agent_steps[-4][6].endswith("logs/agent/experiment-2.initial_planning.jsonl")
+    assert agent_steps[-3][6].endswith("logs/agent/experiment-2-run-1.planning.jsonl")
+    assert agent_steps[-2][6].endswith("logs/agent/experiment-2-run-1.execution.jsonl")
     assert agent_steps[-1][6].endswith(
-        "experiment-2-run-1.issue_resolution.agent.jsonl"
+        "logs/agent/experiment-2-run-1.issue_resolution.jsonl"
     )
-    assert "Hypothesis" in (
-        repo_path / ".autoresearch" / "logs" / "experiment-2-summary.md"
+    summary_text = (
+        repo_path / ".autoresearch" / "logs" / "summaries" / "experiment-2.md"
     ).read_text(encoding="utf-8")
+    assert "Main idea" in summary_text
+    assert "Steps taken" in summary_text
+    assert "Resulting metric: 3.0" in summary_text
     assert fake_agent.calls == 13
     assert sum("template marker" in prompt for prompt in fake_agent.prompts) == 2
 

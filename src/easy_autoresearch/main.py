@@ -31,7 +31,7 @@ from .config import (
 from .prompts import (
     CODEX_SYSTEM_PROMPT,
     build_agent_phase_prompt,
-    build_fallback_summary,
+    build_experiment_summary,
     build_initial_planning_prompt,
     build_setup_prompt,
     build_summary_prompt,
@@ -123,7 +123,7 @@ class AutoResearch:
     def scaffold_repo(self) -> None:
         self.repo_path.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.ensure_log_directories()
         self.prompts_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = self.prompts_dir / "codex-system.md"
         if not prompt_path.exists():
@@ -178,8 +178,8 @@ class AutoResearch:
             return
         result = create_agent(self.require_config(), self.repo_path).run(
             self.build_setup_prompt(),
-            output_path=self.logs_dir / "setup.agent.jsonl",
-            stderr_path=self.logs_dir / "setup.agent.stderr.log",
+            output_path=self.setup_logs_dir / "setup.agent.jsonl",
+            stderr_path=self.setup_logs_dir / "setup.agent.stderr.log",
             timeout_seconds=self.require_config().session.max_duration_seconds,
         )
         if result.exit_code != 0:
@@ -212,6 +212,46 @@ class AutoResearch:
             print(f"Dashboard already running at {self.dashboard_server.url}")
         else:
             print(f"Dashboard available at {self.dashboard_server.url}")
+
+    def ensure_log_directories(self) -> None:
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.setup_logs_dir.mkdir(parents=True, exist_ok=True)
+        self.agent_logs_dir.mkdir(parents=True, exist_ok=True)
+        self.agent_stderr_logs_dir.mkdir(parents=True, exist_ok=True)
+        self.summary_logs_dir.mkdir(parents=True, exist_ok=True)
+        self.run_logs_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def setup_logs_dir(self) -> Path:
+        return self.logs_dir / "setup"
+
+    @property
+    def agent_logs_dir(self) -> Path:
+        return self.logs_dir / "agent"
+
+    @property
+    def agent_stderr_logs_dir(self) -> Path:
+        return self.logs_dir / "agent-stderr"
+
+    @property
+    def summary_logs_dir(self) -> Path:
+        return self.logs_dir / "summaries"
+
+    @property
+    def run_logs_dir(self) -> Path:
+        return self.logs_dir / "runs"
+
+    def run_log_path(self, experiment_index: int, run_index: int) -> Path:
+        return self.run_logs_dir / f"experiment-{experiment_index}-run-{run_index}.log"
+
+    def summary_path_for_experiment(self, experiment_index: int) -> Path:
+        return self.summary_logs_dir / f"experiment-{experiment_index}.md"
+
+    def agent_artifact_paths(self, stem: str) -> tuple[Path, Path]:
+        return (
+            self.agent_logs_dir / f"{stem}.jsonl",
+            self.agent_stderr_logs_dir / f"{stem}.log",
+        )
 
     def stop_dashboard(self) -> None:
         if self.dashboard_server is not None:
@@ -328,7 +368,7 @@ class AutoResearch:
             timeout_seconds=config.session.max_duration_seconds,
             metric_pattern=config.commands.metric_pattern,
         )
-        log_path = self.state_dir / f"experiment-{experiment_index}-run-{run_index}.log"
+        log_path = self.run_log_path(experiment_index, run_index)
         log_path.write_text(result.stdout, encoding="utf-8")
         finish_run(
             connection,
@@ -381,9 +421,6 @@ class AutoResearch:
             initial_planning_result is not None
             and initial_planning_result.status != "completed"
         ):
-            summary_text = self.build_fallback_summary(last_result)
-            summary_path = self.logs_dir / f"experiment-{experiment_index}-summary.md"
-            summary_path.write_text(summary_text, encoding="utf-8")
             update_experiment(
                 connection,
                 experiment_id=experiment_id,
@@ -391,8 +428,6 @@ class AutoResearch:
                 updated_at=utc_now(),
                 best_metric=best_metric,
                 agent_session_id=agent.session_id,
-                summary=summary_text,
-                summary_path=str(summary_path.relative_to(self.repo_path)),
                 agent_log_path=(
                     str(last_agent_log_path.relative_to(self.repo_path))
                     if last_agent_log_path is not None
@@ -489,9 +524,7 @@ class AutoResearch:
                     metric_value=None,
                 )
             last_result = result
-            run_log_path = (
-                self.state_dir / f"experiment-{experiment_index}-run-{run_index}.log"
-            )
+            run_log_path = self.run_log_path(experiment_index, run_index)
             run_log_path.write_text(result.stdout, encoding="utf-8")
             finish_run(
                 connection,
@@ -512,21 +545,24 @@ class AutoResearch:
                 experiment_status = "completed"
                 break
 
-        summary_text = self.build_fallback_summary(last_result)
-        summary_path = self.logs_dir / f"experiment-{experiment_index}-summary.md"
+        summary_text: str | None = None
+        summary_path: Path | None = None
         print(f"Writing summary for experiment {experiment_index}")
         if agent.session_id:
+            summary_path = self.summary_path_for_experiment(experiment_index)
+            summary_output_path, summary_stderr_path = self.agent_artifact_paths(
+                f"experiment-{experiment_index}.summary"
+            )
             summary_result = agent.run(
                 self.build_summary_prompt(last_result),
-                output_path=self.logs_dir
-                / f"experiment-{experiment_index}-summary.agent.jsonl",
-                stderr_path=self.logs_dir
-                / f"experiment-{experiment_index}-summary.agent.stderr.log",
+                output_path=summary_output_path,
+                stderr_path=summary_stderr_path,
                 timeout_seconds=config.session.max_duration_seconds,
             )
-            if summary_result.text:
-                summary_text = summary_result.text
-        summary_path.write_text(summary_text, encoding="utf-8")
+            summary_text = self.build_experiment_summary(
+                summary_result.text, last_result
+            )
+            summary_path.write_text(summary_text, encoding="utf-8")
         update_experiment(
             connection,
             experiment_id=experiment_id,
@@ -535,7 +571,11 @@ class AutoResearch:
             best_metric=best_metric,
             agent_session_id=agent.session_id,
             summary=summary_text,
-            summary_path=str(summary_path.relative_to(self.repo_path)),
+            summary_path=(
+                str(summary_path.relative_to(self.repo_path))
+                if summary_path is not None
+                else None
+            ),
             agent_log_path=(
                 str(last_agent_log_path.relative_to(self.repo_path))
                 if last_agent_log_path is not None
@@ -560,9 +600,7 @@ class AutoResearch:
     ) -> AgentPhaseResult | None:
         print("Agent phase: initial_planning")
         prompt = self.build_initial_planning_prompt(
-            connection,
             template=template,
-            experiment_id=experiment_id,
             experiment_index=experiment_index,
         )
         started_at = utc_now()
@@ -576,13 +614,8 @@ class AutoResearch:
             started_at=started_at,
             created_at=started_at,
         )
-        output_path = (
-            self.logs_dir
-            / f"experiment-{experiment_index}.initial_planning.agent.jsonl"
-        )
-        stderr_path = (
-            self.logs_dir
-            / f"experiment-{experiment_index}.initial_planning.agent.stderr.log"
+        output_path, stderr_path = self.agent_artifact_paths(
+            f"experiment-{experiment_index}.initial_planning"
         )
         result = agent.run(
             prompt,
@@ -641,13 +674,8 @@ class AutoResearch:
                 started_at=started_at,
                 created_at=started_at,
             )
-            output_path = (
-                self.logs_dir
-                / f"experiment-{experiment_index}-run-{run_index}.{phase}.agent.jsonl"
-            )
-            stderr_path = (
-                self.logs_dir
-                / f"experiment-{experiment_index}-run-{run_index}.{phase}.agent.stderr.log"
+            output_path, stderr_path = self.agent_artifact_paths(
+                f"experiment-{experiment_index}-run-{run_index}.{phase}"
             )
             result = agent.run(
                 prompt,
@@ -700,10 +728,8 @@ class AutoResearch:
 
     def build_initial_planning_prompt(
         self,
-        connection,
         *,
         template: str | None,
-        experiment_id: int,
         experiment_index: int,
     ) -> str:
         config = self.require_config()
@@ -711,42 +737,13 @@ class AutoResearch:
             template,
             experiment_index=experiment_index,
             evaluation_command=config.commands.run,
-            session_history=self.current_session_history_for_experiment(
-                connection,
-                experiment_id=experiment_id,
+            summary_dir=str(self.summary_logs_dir.relative_to(self.repo_path)),
+            run_logs_dir=str(self.run_logs_dir.relative_to(self.repo_path)),
+            agent_logs_dir=str(self.agent_logs_dir.relative_to(self.repo_path)),
+            agent_stderr_logs_dir=str(
+                self.agent_stderr_logs_dir.relative_to(self.repo_path)
             ),
-        )
-
-    def current_session_history_for_experiment(
-        self,
-        connection,
-        *,
-        experiment_id: int,
-    ) -> str:
-        rows = connection.execute(
-            """
-            SELECT previous.description, previous.best_metric, previous.summary
-            FROM experiments AS current
-            JOIN experiments AS previous
-                ON previous.session_id = current.session_id
-            WHERE current.id = ?
-              AND previous.id < current.id
-              AND previous.summary IS NOT NULL
-            ORDER BY previous.id ASC
-            """,
-            (experiment_id,),
-        ).fetchall()
-        if not rows:
-            return "No prior experiment summaries are available in this session."
-        return "\n\n".join(
-            "\n".join(
-                [
-                    row["description"],
-                    f"Metric: {row['best_metric']}",
-                    f"Summary:\n{row['summary']}",
-                ]
-            )
-            for row in rows
+            database_path=str(self.database_path.relative_to(self.repo_path)),
         )
 
     def build_setup_prompt(self) -> str:
@@ -755,8 +752,10 @@ class AutoResearch:
     def build_summary_prompt(self, result: CommandResult | None) -> str:
         return build_summary_prompt(result)
 
-    def build_fallback_summary(self, result: CommandResult | None) -> str:
-        return build_fallback_summary(result)
+    def build_experiment_summary(
+        self, summary: str, result: CommandResult | None
+    ) -> str:
+        return build_experiment_summary(summary, result)
 
     def load_prompt_template(self) -> str:
         prompt_path = self.repo_path / self.require_config().agent.prompt_template
