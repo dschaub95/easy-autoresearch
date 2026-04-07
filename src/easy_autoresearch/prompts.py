@@ -164,8 +164,17 @@ def build_experiment_summary(
 
 
 def build_commit_message_prompt() -> str:
-    return "Write a standard git commit message for the changes from this experiment."
+    return (
+        "Write the git commit message for this experiment. Output only the commit "
+        "message text. Include only changes you actually made in this experiment "
+        "session. Do not include explanations or any other text."
+    )
 
 
 def build_setup_commit_message_prompt() -> str:
-    return "Write a standard git commit message for the setup changes made in this repository."
+    return (
+        "Write the git commit message for the setup work in this repository. "
+        "Output only the commit message text. Include only changes you actually "
+        "made during the setup session. Do not include explanations or any other "
+        "text."
+    )

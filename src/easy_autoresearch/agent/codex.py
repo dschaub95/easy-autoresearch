@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any
+from typing import Any, Literal
 
 from easy_autoresearch.config import logs_dir
 
@@ -44,6 +44,16 @@ def _text_parts(value: Any) -> list[str]:
     return []
 
 
+def _completed_agent_message_text(value: Any) -> str | None:
+    if not isinstance(value, dict) or value.get("type") != "item.completed":
+        return None
+    item = value.get("item")
+    if not isinstance(item, dict) or item.get("type") != "agent_message":
+        return None
+    text = item.get("text")
+    return text if isinstance(text, str) and text.strip() else None
+
+
 class Codex(CodingAgent):
     def __init__(
         self,
@@ -65,6 +75,7 @@ class Codex(CodingAgent):
         output_path: Path | None = None,
         stderr_path: Path | None = None,
         timeout_seconds: int | None = None,
+        text_capture: Literal["full", "latest"] = "full",
     ) -> AgentRunResult:
         output_path = output_path or logs_dir(self.repo_path) / "run.jsonl"
         stderr_path = stderr_path or logs_dir(self.repo_path) / "run.stderr.log"
@@ -81,6 +92,7 @@ class Codex(CodingAgent):
         if self.model:
             command.extend(["-m", self.model])
         command += ["resume", self.session_id, prompt] if self.session_id else [prompt]
+        latest_text = ""
         text_parts: list[str] = []
         stderr_parts: list[str] = []
         queue: Queue[tuple[str, str]] = Queue()
@@ -149,7 +161,11 @@ class Codex(CodingAgent):
                         line_text_parts = [
                             part for part in _text_parts(payload) if part
                         ]
-                        text_parts.extend(line_text_parts)
+                        if line_text_parts:
+                            text_parts.extend(line_text_parts)
+                        agent_message_text = _completed_agent_message_text(payload)
+                        if agent_message_text is not None:
+                            latest_text = agent_message_text
                         if self.stream_output:
                             for part in line_text_parts:
                                 print(f"[codex] {part}", flush=True)
@@ -184,6 +200,10 @@ class Codex(CodingAgent):
             output_path=output_path,
             stderr_path=stderr_path,
             session_id=self.session_id,
-            text="\n".join(part for part in text_parts if part).strip(),
+            text=(
+                latest_text
+                if text_capture == "latest"
+                else "\n".join(part for part in text_parts if part).strip()
+            ),
             stderr="".join(stderr_parts) or stderr_path.read_text(encoding="utf-8"),
         )

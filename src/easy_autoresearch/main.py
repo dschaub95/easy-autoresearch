@@ -227,6 +227,7 @@ class AutoResearch:
             output_path=self.setup_logs_dir / "setup.commit_message.jsonl",
             stderr_path=self.setup_logs_dir / "setup.commit_message.stderr.log",
             timeout_seconds=self.require_config().session.max_duration_seconds,
+            text_capture="latest",
         )
         if (
             commit_message_result.exit_code != 0
@@ -870,6 +871,7 @@ class AutoResearch:
             output_path=output_path,
             stderr_path=stderr_path,
             timeout_seconds=self.require_config().session.max_duration_seconds,
+            text_capture="latest",
         )
         status = "completed" if result.exit_code == 0 else "failed"
         finish_agent_step(

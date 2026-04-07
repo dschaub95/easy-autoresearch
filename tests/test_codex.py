@@ -213,6 +213,29 @@ def test_codex_reuses_session_id_across_runs(
     ]
 
 
+def test_codex_run_accumulates_text_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_popen(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return FakePopen(
+            args[0],
+            stdout_lines=[
+                '{"text":"thinking"}\n',
+                '{"content":"draft message"}\n',
+                '{"text":"final commit message"}\n',
+            ],
+            stderr_lines=[],
+            returncode=0,
+        )
+
+    monkeypatch.setattr("easy_autoresearch.agent.codex.subprocess.Popen", fake_popen)
+    logs_dir(tmp_path).mkdir(parents=True)
+
+    result = Codex(tmp_path).run("normal prompt")
+
+    assert result.text == "thinking\ndraft message\nfinal commit message"
+
+
 def test_codex_is_a_coding_agent() -> None:
     assert issubclass(Codex, CodingAgent)
 
@@ -246,3 +269,26 @@ def test_codex_run_supports_custom_log_paths(
     assert result.stderr_path == stderr_path
     assert result.text == "done"
     assert result.stderr == "stderr\n"
+
+
+def test_codex_run_returns_only_latest_text_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_popen(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return FakePopen(
+            args[0],
+            stdout_lines=[
+                '{"type":"item.completed","item":{"type":"agent_message","text":"thinking"}}\n',
+                '{"type":"item.completed","item":{"type":"agent_message","text":"final commit message"}}\n',
+                '{"type":"item.completed","item":{"type":"command_execution","aggregated_output":"not the commit message","text":"ignore me"}}\n',
+            ],
+            stderr_lines=[],
+            returncode=0,
+        )
+
+    monkeypatch.setattr("easy_autoresearch.agent.codex.subprocess.Popen", fake_popen)
+    logs_dir(tmp_path).mkdir(parents=True)
+
+    result = Codex(tmp_path).run("commit prompt", text_capture="latest")
+
+    assert result.text == "final commit message"

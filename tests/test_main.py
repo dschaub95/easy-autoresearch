@@ -219,6 +219,65 @@ def test_build_setup_prompt_forbids_hardcoded_hyperparameters_in_run_command(
     assert "template" not in prompt
 
 
+def test_prepare_repo_setup_uses_latest_agent_message_for_setup_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_tracking: dict[str, object],
+) -> None:
+    repo_path = tmp_path / "target-repo"
+    autoresearch = main_module.AutoResearch(repo_path, assume_yes=True, headless=True)
+    autoresearch.scaffold_repo()
+
+    class FakeSetupAgent:
+        def __init__(self) -> None:
+            self.session_id = "setup-session"
+            self.calls: list[tuple[str, str]] = []
+
+        def run(self, prompt: str, **kwargs) -> AgentRunResult:
+            text_capture = kwargs.get("text_capture", "full")
+            self.calls.append((prompt, text_capture))
+            config_file = repo_path / CONFIG_FILENAME
+            if config_file.exists():
+                config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+                config["commands"]["metric_pattern"] = r"^metric:\s+([\d.]+)"
+                config_file.write_text(
+                    yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+                )
+            kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
+            kwargs["stderr_path"].write_text("", encoding="utf-8")
+            text = (
+                "thinking\nfinal setup commit"
+                if "commit message" in prompt.lower() and text_capture == "full"
+                else (
+                    "final setup commit"
+                    if "commit message" in prompt.lower()
+                    else "setup"
+                )
+            )
+            return AgentRunResult(
+                exit_code=0,
+                output_path=kwargs["output_path"],
+                stderr_path=kwargs["stderr_path"],
+                session_id=self.session_id,
+                text=text,
+                stderr="",
+            )
+
+    fake_agent = FakeSetupAgent()
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: fake_agent,
+    )
+
+    autoresearch.prepare_repo_setup()
+
+    assert fake_agent.calls == [
+        (autoresearch.build_setup_prompt(), "full"),
+        (main_module.build_setup_commit_message_prompt(), "latest"),
+    ]
+    assert fake_git_tracking["commit_messages"] == ["final setup commit"]
+
+
 def test_run_starts_dashboard_server_and_prints_selected_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -526,7 +585,7 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             self.calls += 1
             text = (
                 "Refine evaluation workflow"
-                if "Write a standard git commit message" in prompt
+                if "Write the git commit message" in prompt
                 else (
                     "Main idea\n- Improve the metric with a targeted code change.\n\nSteps taken\n- Updated the implementation.\n- Re-ran the evaluation command."
                     if "Summarize this experiment in plain text" in prompt
@@ -667,6 +726,10 @@ def test_run_uses_coding_agent_for_candidate_experiments(
     assert fake_agent.calls == 14
     assert sum("template marker" in prompt for prompt in fake_agent.prompts) == 2
     assert "Previous best metric: 2.0." in agent_steps[-5][4]
+    assert (
+        "Output only the commit message text. Include only changes you actually "
+        "made in this experiment session." in agent_steps[-1][4]
+    )
     assert fake_git_tracking["commit_messages"] == [
         "setup",
         "setup",
