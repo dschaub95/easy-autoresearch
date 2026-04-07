@@ -999,6 +999,113 @@ def test_run_overwrites_existing_setup(
     assert config["commands"]["run"] == "uv run pytest"
 
 
+def test_yes_flag_skips_interactive_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path = tmp_path / "target-repo"
+    results = command_results(
+        CommandResult(
+            command="baseline",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command", lambda *args, **kwargs: next(results)
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _: pytest.fail("input should not be called when --yes is set"),
+    )
+
+    exit_code = main(["--headless", "--yes", str(repo_path)])
+
+    assert exit_code == 0
+    assert (repo_path / CONFIG_FILENAME).exists()
+
+
+def test_yes_flag_still_prompts_for_existing_setup_choice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path = tmp_path / "project"
+    initial_results = command_results(
+        CommandResult(
+            command="initial",
+            exit_code=1,
+            stdout="",
+            stderr="",
+            status="failed",
+            metric_value=None,
+        ),
+        CommandResult(
+            command="initial-candidate",
+            exit_code=1,
+            stdout="metric: 7.0\n",
+            stderr="",
+            status="failed",
+            metric_value=7.0,
+        ),
+        CommandResult(
+            command="overwrite",
+            exit_code=0,
+            stdout="metric: 7.0\n",
+            stderr="",
+            status="completed",
+            metric_value=7.0,
+        ),
+        CommandResult(
+            command="overwrite-candidate",
+            exit_code=0,
+            stdout="metric: 7.0\n",
+            stderr="",
+            status="completed",
+            metric_value=7.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(initial_results),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    responses = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    main(["--headless", str(repo_path)])
+
+    prompted: list[str] = []
+
+    def fake_input(prompt: str) -> str:
+        prompted.append(prompt)
+        return "c"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    exit_code = main(["--headless", "--yes", str(repo_path)])
+
+    assert exit_code == 0
+    assert prompted == [
+        f"Existing easy-autoresearch setup found in {repo_path.resolve()}. "
+        "Continue with it or overwrite it? [c/o]: "
+    ]
+
+
 def test_main_defaults_to_current_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -19,6 +19,7 @@ and stores the outputs, but it does not yet ask Codex to propose code changes.
 ```bash
 uvx easy-autoresearch
 uvx easy-autoresearch /path/to/repo
+uvx easy-autoresearch -y /path/to/repo
 uvx easy-autoresearch --overwrite /path/to/repo
 uvx easy-autoresearch --headless /path/to/repo
 uvx easy-autoresearch dashboard /path/to/repo
@@ -32,6 +33,7 @@ On startup it checks for an existing setup:
 
 - if no setup exists, it scaffolds the repo and starts a session
 - if a setup exists, it prompts to continue or overwrite
+- `-y` / `--yes` skips yes/no prompts during setup review
 - `--overwrite` skips the prompt and recreates the setup automatically
 
 When the actual research loop starts, easy-autoresearch now also starts a local

@@ -125,6 +125,7 @@ class AutoResearch:
         repo_path: Path,
         config: AutoResearchConfig | None = None,
         *,
+        assume_yes: bool = False,
         headless: bool = False,
         server_host: str = "127.0.0.1",
         server_port: int = 8765,
@@ -137,6 +138,7 @@ class AutoResearch:
         self.prompts_dir = prompts_dir(self.repo_path)
         self.database_path = db_path(self.repo_path)
         self.ready_to_start = True
+        self.assume_yes = assume_yes
         self.headless = headless
         self.server_host = server_host
         self.server_port = server_port
@@ -168,14 +170,14 @@ class AutoResearch:
             shutil.rmtree(self.state_dir)
         self.config = None
 
+    def should_overwrite_existing_setup(self, *, overwrite: bool) -> bool:
+        if overwrite:
+            return True
+        return prompt_for_existing_setup(self.repo_path)
+
     def resolve_setup_state(self, *, overwrite: bool = False) -> None:
         if self.has_existing_setup():
-            if overwrite:
-                self.overwrite_setup()
-                print(
-                    f"Overwriting existing easy-autoresearch setup in {self.repo_path}"
-                )
-            elif prompt_for_existing_setup(self.repo_path):
+            if self.should_overwrite_existing_setup(overwrite=overwrite):
                 self.overwrite_setup()
                 print(
                     f"Overwriting existing easy-autoresearch setup in {self.repo_path}"
@@ -193,7 +195,11 @@ class AutoResearch:
             self.config = load_config(self.repo_path)
 
     def review_scaffold_if_needed(self) -> None:
-        if self.did_scaffold and not prompt_for_config_review(self.config_file):
+        if (
+            self.did_scaffold
+            and not self.assume_yes
+            and not prompt_for_config_review(self.config_file)
+        ):
             print("Cancelled after scaffolding so you can adjust the config.")
             self.ready_to_start = False
 
@@ -239,6 +245,7 @@ class AutoResearch:
         if (
             self.did_scaffold
             and self.ready_to_start
+            and not self.assume_yes
             and not prompt_for_setup_review(self.repo_path)
         ):
             print("Cancelled after setup so you can review the changes.")
@@ -1068,6 +1075,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="easy-autoresearch")
     parser.add_argument("repo_path", nargs="?", type=Path, default=Path("."))
     parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Automatically answer yes to yes/no prompts.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite any existing easy-autoresearch setup before starting.",
@@ -1183,6 +1196,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     autoresearch = AutoResearch(
         args.repo_path,
+        assume_yes=args.yes,
         headless=args.headless,
         server_port=args.server_port,
     )
