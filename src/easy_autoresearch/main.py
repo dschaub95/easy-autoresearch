@@ -62,6 +62,8 @@ from .storage import (
     finish_session,
     initialize_database,
     update_experiment,
+    update_session_setup_commit,
+    update_session_status,
 )
 
 
@@ -149,6 +151,8 @@ class AutoResearch:
         self.server_port = server_port
         self.dashboard_server: DashboardServer | None = None
         self.did_scaffold = False
+        self.session_id: int | None = None
+        self.session_branch: str | None = None
         self.setup_commit_sha: str | None = None
         self.baseline_runtime_seconds: float | None = None
         self.runtime_cap_seconds: float | None = None
@@ -248,6 +252,7 @@ class AutoResearch:
         self.setup_commit_sha = commit_all_changes(
             self.repo_path, commit_message_result.text.strip()
         )
+        self.persist_setup_commit_sha()
 
     def review_prepared_setup_if_needed(self) -> None:
         if (
@@ -258,6 +263,69 @@ class AutoResearch:
         ):
             print("Cancelled after setup so you can review the changes.")
             self.ready_to_start = False
+            self.cancel_open_session()
+
+    def open_session_branch(self) -> None:
+        if not self.ready_to_start or self.session_id is not None:
+            return
+        config = self.require_config()
+        opened_at = utc_now()
+        with connect(self.database_path) as connection:
+            session_id = create_session(
+                connection,
+                repo_path=str(self.repo_path),
+                max_duration_seconds=config.session.max_duration_seconds,
+                status="preparing",
+                setup_commit_sha=self.setup_commit_sha,
+                started_at=opened_at,
+                created_at=opened_at,
+            )
+        try:
+            session_branch = switch_to_session_branch(self.repo_path, session_id)
+        except GitWorktreeError:
+            with connect(self.database_path) as connection:
+                finish_session(
+                    connection,
+                    session_id=session_id,
+                    status="failed",
+                    finished_at=utc_now(),
+                )
+            raise
+        self.session_id = session_id
+        self.session_branch = session_branch
+        print(f"Switched to session branch {session_branch}")
+
+    def persist_setup_commit_sha(self) -> None:
+        if self.session_id is None:
+            return
+        with connect(self.database_path) as connection:
+            update_session_setup_commit(
+                connection,
+                session_id=self.session_id,
+                setup_commit_sha=self.setup_commit_sha,
+            )
+
+    def cancel_open_session(self) -> None:
+        if self.session_id is None:
+            return
+        with connect(self.database_path) as connection:
+            finish_session(
+                connection,
+                session_id=self.session_id,
+                status="cancelled",
+                finished_at=utc_now(),
+            )
+
+    def fail_open_session(self) -> None:
+        if self.session_id is None:
+            return
+        with connect(self.database_path) as connection:
+            finish_session(
+                connection,
+                session_id=self.session_id,
+                status="failed",
+                finished_at=utc_now(),
+            )
 
     def start_dashboard(self) -> None:
         if self.headless or self.dashboard_server is not None:
@@ -321,22 +389,18 @@ class AutoResearch:
     def run_session(self) -> int:
         if not self.ready_to_start:
             return 0
+        if self.session_id is None or self.session_branch is None:
+            raise RuntimeError("Session branch must be created before running.")
         config = self.require_config()
-        self.validate_config()
+        self.validate_runnable_config()
         print(f"Starting autoresearch in {self.repo_path}")
-        started_at = utc_now()
+        session_id = self.session_id
         with connect(self.database_path) as connection:
-            session_id = create_session(
+            update_session_status(
                 connection,
-                repo_path=str(self.repo_path),
-                max_duration_seconds=config.session.max_duration_seconds,
+                session_id=session_id,
                 status="running",
-                setup_commit_sha=self.setup_commit_sha,
-                started_at=started_at,
-                created_at=started_at,
             )
-            session_branch = switch_to_session_branch(self.repo_path, session_id)
-            print(f"Switched to session branch {session_branch}")
             print("Running baseline experiment")
 
             experiment_count = 0
@@ -1026,15 +1090,8 @@ class AutoResearch:
             return False
         return result.runtime_seconds <= self.runtime_cap_seconds
 
-    def validate_config(self) -> None:
+    def validate_pre_setup_config(self) -> None:
         config = self.require_config()
-        if config.experiments.max_experiments > 0:
-            if not config.commands.run:
-                raise ValueError("commands.run must be configured")
-            if not config.commands.metric_pattern:
-                raise ValueError(
-                    "commands.metric_pattern must be configured for agent experiments"
-                )
         runtime_limit = config.constraints.runtime
         if runtime_limit is not None:
             if isinstance(runtime_limit, (int, float)) and not isinstance(
@@ -1048,6 +1105,17 @@ class AutoResearch:
                 raise ValueError(
                     "constraints.runtime must be null, a float ratio, or a duration string"
                 )
+
+    def validate_runnable_config(self) -> None:
+        config = self.require_config()
+        if config.experiments.max_experiments > 0:
+            if not config.commands.run:
+                raise ValueError("commands.run must be configured")
+            if not config.commands.metric_pattern:
+                raise ValueError(
+                    "commands.metric_pattern must be configured for agent experiments"
+                )
+        self.validate_pre_setup_config()
 
 
 def parse_metric(output: str, pattern: str | None) -> float | None:
@@ -1368,8 +1436,15 @@ def main(argv: list[str] | None = None) -> int:
         autoresearch.scaffold_if_needed()
         autoresearch.start_dashboard()
         autoresearch.review_scaffold_if_needed()
-        autoresearch.prepare_repo_setup()
-        autoresearch.review_prepared_setup_if_needed()
+        if not autoresearch.did_scaffold:
+            autoresearch.validate_pre_setup_config()
+        autoresearch.open_session_branch()
+        try:
+            autoresearch.prepare_repo_setup()
+            autoresearch.review_prepared_setup_if_needed()
+        except Exception:
+            autoresearch.fail_open_session()
+            raise
         return autoresearch.run_session()
     except GitWorktreeError as error:
         print(error)

@@ -18,6 +18,8 @@ from easy_autoresearch.storage.writes import (
     finish_session,
     insert_row,
     update_experiment,
+    update_session_setup_commit,
+    update_session_status,
 )
 
 __all__ = [
@@ -38,4 +40,6 @@ __all__ = [
     "recent_activity",
     "session_snapshot",
     "update_experiment",
+    "update_session_setup_commit",
+    "update_session_status",
 ]

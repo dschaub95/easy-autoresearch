@@ -64,6 +64,34 @@ def finish_session(
     )
 
 
+def update_session_status(
+    connection: sqlite3.Connection, *, session_id: int, status: str
+) -> None:
+    execute(
+        connection,
+        """
+        UPDATE sessions
+        SET status = ?
+        WHERE id = ?
+        """,
+        (status, session_id),
+    )
+
+
+def update_session_setup_commit(
+    connection: sqlite3.Connection, *, session_id: int, setup_commit_sha: str | None
+) -> None:
+    execute(
+        connection,
+        """
+        UPDATE sessions
+        SET setup_commit_sha = ?
+        WHERE id = ?
+        """,
+        (setup_commit_sha, session_id),
+    )
+
+
 def create_experiment(
     connection: sqlite3.Connection,
     *,

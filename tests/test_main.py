@@ -224,6 +224,52 @@ def test_setup_can_be_cancelled_for_config_review(
     assert sessions == (0,)
 
 
+def test_setup_review_cancellation_marks_open_session_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path = tmp_path / "target-repo"
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    responses = iter(["y", "n"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+
+    exit_code = main(["--headless", str(repo_path)])
+
+    assert exit_code == 0
+    with sqlite3.connect(db_path(repo_path)) as connection:
+        sessions = connection.execute(
+            "SELECT status, setup_commit_sha FROM sessions"
+        ).fetchall()
+
+    assert sessions == [("cancelled", "commit-1")]
+
+
+def test_invalid_config_fails_before_session_branch_is_opened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_tracking: dict[str, object],
+) -> None:
+    repo_path = tmp_path / "target-repo"
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    main(["--headless", "--yes", str(repo_path)])
+    write_config_updates(repo_path, runtime=0)
+    monkeypatch.setattr("builtins.input", lambda _: "c")
+
+    with pytest.raises(ValueError, match="greater than zero"):
+        main_module.main(["--headless", "--yes", str(repo_path)])
+
+    assert fake_git_tracking["session_branch_calls"] == [1]
+    with sqlite3.connect(db_path(repo_path)) as connection:
+        sessions = connection.execute("SELECT status FROM sessions").fetchall()
+
+    assert sessions == [("failed",)]
+
+
 def test_build_setup_prompt_forbids_hardcoded_hyperparameters_in_run_command(
     tmp_path: Path,
 ) -> None:
@@ -296,6 +342,97 @@ def test_prepare_repo_setup_uses_latest_agent_message_for_setup_commit(
         (main_module.build_setup_commit_message_prompt(), "latest"),
     ]
     assert fake_git_tracking["commit_messages"] == ["final setup commit"]
+
+
+def test_session_branch_is_created_before_repo_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path = tmp_path / "target-repo"
+    events: list[str] = []
+    results = command_results(
+        CommandResult(
+            command="baseline",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+    )
+
+    class RecordingSetupAgent(NoOpSetupAgent):
+        def run(self, prompt: str, **kwargs) -> AgentRunResult:
+            if (
+                "prepare this repository for repeated local optimization"
+                in prompt.lower()
+            ):
+                events.append("setup")
+            return super().run(prompt, **kwargs)
+
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command", lambda *args, **kwargs: next(results)
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: RecordingSetupAgent(),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.switch_to_session_branch",
+        lambda _, session_id: (
+            events.append("branch") or f"autoresearch/session-{session_id}"
+        ),
+    )
+    responses = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+
+    exit_code = main(["--headless", str(repo_path)])
+
+    assert exit_code == 0
+    assert events[:2] == ["branch", "setup"]
+
+
+def test_setup_failure_marks_open_session_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path = tmp_path / "target-repo"
+
+    class FailingSetupAgent:
+        session_id = "setup-session"
+
+        def run(self, prompt: str, **kwargs) -> AgentRunResult:
+            kwargs["output_path"].write_text('{"text":"failed"}\n', encoding="utf-8")
+            kwargs["stderr_path"].write_text("boom\n", encoding="utf-8")
+            return AgentRunResult(
+                exit_code=1,
+                output_path=kwargs["output_path"],
+                stderr_path=kwargs["stderr_path"],
+                session_id=self.session_id,
+                text="failed",
+                stderr="boom\n",
+            )
+
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: FailingSetupAgent(),
+    )
+    responses = iter(["y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+
+    with pytest.raises(RuntimeError, match="Agent setup failed"):
+        main(["--headless", str(repo_path)])
+
+    with sqlite3.connect(db_path(repo_path)) as connection:
+        sessions = connection.execute("SELECT status FROM sessions").fetchall()
+
+    assert sessions == [("failed",)]
 
 
 def test_parse_duration_to_seconds_supports_human_readable_values() -> None:
