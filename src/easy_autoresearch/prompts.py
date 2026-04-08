@@ -99,14 +99,14 @@ def build_setup_prompt() -> str:
         [
             "Prepare this repository for repeated local optimization of its end-to-end workflow.",
             (
-                "If necessary create or adjust a clear local run command that generally includes "
-                "both training and evaluation. Ensure it prints at least one "
-                "meaningful scalar metric to stdout, and update autoresearch.yaml "
-                "so commands.run is that command and commands.metric_pattern "
-                "matches that metric."
+                "If necessary create or adjust a clear local run command that can "
+                "be run as is and that generally includes both training and "
+                "evaluation. Ensure it prints at least one meaningful scalar "
+                "metric to stdout, and update autoresearch.yaml so commands.run "
+                "is that command and commands.metric_pattern matches that metric."
             ),
             (
-                "Make each run reproducible: rerunning commands.run should "
+                "Make each run reproducible: rerunning commands.run as is should "
                 "generally produce the same result, especially through explicit "
                 "seeding where needed."
             ),
