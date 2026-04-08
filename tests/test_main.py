@@ -26,6 +26,7 @@ def write_config_updates(
     metric_pattern: str | None = None,
     max_experiments: int | None = None,
     max_runs_per_experiment: int | None = None,
+    runtime: int | float | str | None = None,
 ) -> None:
     config_file = repo_path / CONFIG_FILENAME
     config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
@@ -37,6 +38,10 @@ def write_config_updates(
         config["experiments"]["max_experiments"] = max_experiments
     if max_runs_per_experiment is not None:
         config["experiments"]["max_runs_per_experiment"] = max_runs_per_experiment
+    if runtime is not None or "constraints" not in config:
+        config.setdefault("constraints", {})
+    if runtime is not None:
+        config["constraints"]["runtime"] = runtime
     config_file.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
 
@@ -162,6 +167,7 @@ def test_run_scaffolds_and_starts_session(
     assert config["agent"]["model"] == "gpt-5.4-mini"
     assert config["agent"]["sandbox_mode"] == "workspace-write"
     assert config["agent"]["prompt_template"] == ".autoresearch/prompts/codex-system.md"
+    assert config["constraints"] == {"runtime": None}
 
     with sqlite3.connect(db_path(repo_path)) as connection:
         sessions = connection.execute(
@@ -276,6 +282,20 @@ def test_prepare_repo_setup_uses_latest_agent_message_for_setup_commit(
         (main_module.build_setup_commit_message_prompt(), "latest"),
     ]
     assert fake_git_tracking["commit_messages"] == ["final setup commit"]
+
+
+def test_parse_duration_to_seconds_supports_human_readable_values() -> None:
+    assert main_module.parse_duration_to_seconds("30s") == 30
+    assert main_module.parse_duration_to_seconds("5m") == 300
+    assert main_module.parse_duration_to_seconds("1h30m") == 5400
+    assert main_module.parse_duration_to_seconds("2m15s") == 135
+
+
+def test_parse_duration_to_seconds_rejects_invalid_values() -> None:
+    with pytest.raises(ValueError, match="duration strings"):
+        main_module.parse_duration_to_seconds("5 min")
+    with pytest.raises(ValueError, match="largest to smallest"):
+        main_module.parse_duration_to_seconds("30s1m")
 
 
 def test_run_starts_dashboard_server_and_prints_selected_url(
@@ -735,6 +755,151 @@ def test_run_uses_coding_agent_for_candidate_experiments(
         "setup",
         "Refine evaluation workflow",
     ]
+
+
+def test_runtime_constraint_is_included_in_planning_prompts(tmp_path: Path) -> None:
+    repo_path = tmp_path / "project"
+    autoresearch = main_module.AutoResearch(repo_path, assume_yes=True, headless=True)
+    autoresearch.scaffold_repo()
+    write_config_updates(
+        repo_path,
+        runtime=1.1,
+    )
+    autoresearch.config = main_module.load_config(repo_path)
+    autoresearch.baseline_runtime_seconds = 10.0
+    autoresearch.runtime_cap_seconds = 11.0
+
+    initial_prompt = autoresearch.build_initial_planning_prompt(
+        template="template marker",
+        experiment_index=1,
+        previous_best_metric=2.0,
+    )
+    phase_prompt = autoresearch.build_agent_phase_prompt(1, 1, "planning")
+
+    assert "Hard runtime constraint" in initial_prompt
+    assert "Current runtime cap: 11.000s." in initial_prompt
+    assert "Hard runtime constraint" in phase_prompt
+
+
+def test_runtime_constraint_blocks_metric_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_tracking: dict[str, object],
+) -> None:
+    repo_path = tmp_path / "project"
+    baseline_results = command_results(
+        CommandResult(
+            command="baseline",
+            exit_code=0,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="completed",
+            metric_value=2.0,
+            runtime_seconds=10.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=0,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="completed",
+            metric_value=2.0,
+            runtime_seconds=10.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(baseline_results),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    responses = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    main(["--headless", str(repo_path)])
+    write_config_updates(
+        repo_path,
+        run="python -c \"print('metric: 3.0')\"",
+        metric_pattern=r"^metric:\s+([\d.]+)",
+        max_experiments=1,
+        max_runs_per_experiment=1,
+        runtime=1.1,
+    )
+
+    evaluation_results = command_results(
+        CommandResult(
+            command="baseline",
+            exit_code=0,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="completed",
+            metric_value=2.0,
+            runtime_seconds=10.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+            runtime_seconds=12.0,
+        ),
+    )
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.session_id = "sess-runtime"
+
+        def run(self, prompt: str, **kwargs) -> AgentRunResult:
+            text = (
+                "Main idea\n- Attempted a higher-scoring but slower variant.\n\nSteps taken\n- Updated the experiment."
+                if "Summarize this experiment in plain text" in prompt
+                else "working"
+            )
+            kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
+            kwargs["stderr_path"].write_text("", encoding="utf-8")
+            return AgentRunResult(
+                exit_code=0,
+                output_path=kwargs["output_path"],
+                stderr_path=kwargs["stderr_path"],
+                session_id=self.session_id,
+                text=text,
+                stderr="",
+            )
+
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent", lambda config, repo_path: FakeAgent()
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(evaluation_results),
+    )
+    responses = iter(["c", "y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+
+    exit_code = main(["--headless", str(repo_path)])
+
+    assert exit_code == 1
+    summary_text = (
+        repo_path / ".autoresearch" / "logs" / "summaries" / "experiment-1.md"
+    ).read_text(encoding="utf-8")
+    assert "Runtime cap: 11.000s" in summary_text
+    assert "Runtime constraint satisfied: no" in summary_text
+    with sqlite3.connect(db_path(repo_path)) as connection:
+        experiment = connection.execute(
+            "SELECT best_metric, metric_improved, changes_discarded, commit_sha "
+            "FROM experiments ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        run = connection.execute(
+            "SELECT status, metric_value, stderr FROM runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert experiment == (None, 0, 1, None)
+    assert run[0] == "failed"
+    assert run[1] == 3.0
+    assert "Runtime constraint violated." in run[2]
+    assert fake_git_tracking["commit_messages"] == ["setup"]
 
 
 def test_scaffolded_codex_system_prompt_is_empty(tmp_path: Path) -> None:

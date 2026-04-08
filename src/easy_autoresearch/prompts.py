@@ -32,13 +32,17 @@ def build_agent_phase_prompt(
     run_index: int,
     phase: AgentPhase,
     evaluation_command: str,
+    runtime_constraint_text: str | None = None,
 ) -> str:
     return "\n\n".join(
-        [
+        part
+        for part in [
             f"Experiment {experiment_index}, attempt {run_index}, phase: {phase}.",
             AGENT_PHASE_INSTRUCTIONS[phase],
             f"The evaluation command is `{evaluation_command}`.",
+            runtime_constraint_text,
         ]
+        if part
     )
 
 
@@ -53,6 +57,7 @@ def build_initial_planning_prompt(
     agent_stderr_logs_dir: str,
     database_path: str,
     previous_best_metric: float | None,
+    runtime_constraint_text: str | None = None,
 ) -> str:
     return "\n\n".join(
         part
@@ -66,6 +71,7 @@ def build_initial_planning_prompt(
             f"Start by carefully reading all summary markdown files under `{summary_dir}`.",
             f"The evaluation command is `{evaluation_command}`.",
             f"Previous best metric: {format_metric(previous_best_metric)}.",
+            runtime_constraint_text,
             (
                 "Use web search and relevant scientific or technical literature when "
                 "it would materially improve the idea selection."
@@ -139,6 +145,12 @@ def format_metric(metric_value: float | None) -> str:
     return str(metric_value) if metric_value is not None else "n/a"
 
 
+def format_runtime(runtime_seconds: float | None) -> str:
+    if runtime_seconds is None:
+        return "n/a"
+    return f"{runtime_seconds:.3f}s"
+
+
 def build_experiment_summary(
     summary: str,
     result: CommandResult | None,
@@ -146,6 +158,9 @@ def build_experiment_summary(
     previous_best_metric: float | None,
     metric_improved: bool,
     changes_discarded: bool,
+    baseline_runtime_seconds: float | None = None,
+    runtime_cap_seconds: float | None = None,
+    runtime_constraint_satisfied: bool | None = None,
 ) -> str:
     base_summary = summary.strip()
     metric_text = format_metric(result.metric_value if result is not None else None)
@@ -153,6 +168,16 @@ def build_experiment_summary(
     footer = "\n".join(
         [
             f"Resulting metric: {metric_text}",
+            (
+                "Resulting runtime: "
+                f"{format_runtime(result.runtime_seconds if result is not None else None)}"
+            ),
+            f"Baseline runtime: {format_runtime(baseline_runtime_seconds)}",
+            f"Runtime cap: {format_runtime(runtime_cap_seconds)}",
+            (
+                "Runtime constraint satisfied: "
+                f"{format_yes_no(runtime_constraint_satisfied)}"
+            ),
             f"Previous best metric: {previous_best_metric_text}",
             f"Metric improved: {'yes' if metric_improved else 'no'}",
             f"Changes discarded: {'yes' if changes_discarded else 'no'}",
@@ -178,3 +203,32 @@ def build_setup_commit_message_prompt() -> str:
         "made during the setup session. Do not include explanations or any other "
         "text."
     )
+
+
+def build_runtime_constraint_text(
+    *,
+    runtime_cap_seconds: float | None,
+    baseline_runtime_seconds: float | None,
+) -> str | None:
+    if runtime_cap_seconds is None:
+        return None
+    parts = [
+        "Primary objective: improve the metric.",
+        (
+            "Hard runtime constraint: candidate runs must stay within the runtime "
+            "cap. Prefer lower runtime when metric tradeoffs are otherwise similar."
+        ),
+    ]
+    if baseline_runtime_seconds is not None:
+        parts.append(
+            f"Observed baseline runtime: {format_runtime(baseline_runtime_seconds)}."
+        )
+    if runtime_cap_seconds is not None:
+        parts.append(f"Current runtime cap: {format_runtime(runtime_cap_seconds)}.")
+    return " ".join(parts)
+
+
+def format_yes_no(value: bool | None) -> str:
+    if value is None:
+        return "n/a"
+    return "yes" if value else "no"

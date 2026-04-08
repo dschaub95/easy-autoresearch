@@ -73,12 +73,18 @@ class AgentConfig:
 
 
 @dataclass(slots=True)
+class ConstraintsConfig:
+    runtime: int | float | str | None = None
+
+
+@dataclass(slots=True)
 class AutoResearchConfig:
     project: ProjectConfig
     commands: CommandsConfig = field(default_factory=CommandsConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     experiments: ExperimentsConfig = field(default_factory=ExperimentsConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    constraints: ConstraintsConfig = field(default_factory=ConstraintsConfig)
     editable_paths: list[str] = field(default_factory=list)
     readonly_paths: list[str] = field(default_factory=list)
 
@@ -89,6 +95,7 @@ class AutoResearchConfig:
         session_data = data.get("session") or {}
         experiments_data = data.get("experiments") or {}
         agent_data = data.get("agent") or {}
+        constraints_data = data.get("constraints") or {}
         if not agent_data and (codex_data := data.get("codex") or {}):
             agent_data = {
                 "provider": "codex",
@@ -107,6 +114,7 @@ class AutoResearchConfig:
             session=SessionConfig(**session_data),
             experiments=ExperimentsConfig(**experiments_data),
             agent=AgentConfig(**agent_data),
+            constraints=ConstraintsConfig(**constraints_data),
             editable_paths=list(data.get("editable_paths") or []),
             readonly_paths=list(data.get("readonly_paths") or []),
         )

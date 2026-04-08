@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +45,7 @@ from .prompts import (
     build_commit_message_prompt,
     build_experiment_summary,
     build_initial_planning_prompt,
+    build_runtime_constraint_text,
     build_setup_commit_message_prompt,
     build_setup_prompt,
     build_summary_prompt,
@@ -74,6 +76,7 @@ class CommandResult:
     stderr: str
     status: str
     metric_value: float | None
+    runtime_seconds: float | None = None
 
 
 AgentPhase = Literal["planning", "execution", "issue_resolution"]
@@ -100,6 +103,7 @@ class ExperimentResult:
     status: str
     best_metric: float | None
     run_count: int
+    best_runtime_seconds: float | None = None
     previous_best_metric: float | None = None
     metric_improved: bool = False
     changes_discarded: bool = False
@@ -145,6 +149,8 @@ class AutoResearch:
         self.dashboard_server: DashboardServer | None = None
         self.did_scaffold = False
         self.setup_commit_sha: str | None = None
+        self.baseline_runtime_seconds: float | None = None
+        self.runtime_cap_seconds: float | None = None
 
     def scaffold_repo(self) -> None:
         self.repo_path.mkdir(parents=True, exist_ok=True)
@@ -351,6 +357,10 @@ class AutoResearch:
                 experiment_id=baseline_experiment_id,
                 experiment_index=1,
             )
+            self.baseline_runtime_seconds = baseline_result.best_runtime_seconds
+            self.runtime_cap_seconds = self.resolve_runtime_cap_seconds(
+                self.baseline_runtime_seconds
+            )
             session_best_metric = baseline_result.best_metric
             total_run_count += baseline_result.run_count
             if (
@@ -455,6 +465,7 @@ class AutoResearch:
             status=result.status,
             best_metric=result.metric_value,
             run_count=1,
+            best_runtime_seconds=result.runtime_seconds,
         )
 
     def run_agent_experiment(
@@ -603,18 +614,25 @@ class AutoResearch:
                 )
                 print("Evaluation finished")
                 if result.metric_value is None:
-                    result = CommandResult(
-                        command=result.command,
-                        exit_code=result.exit_code,
-                        stdout=result.stdout,
-                        stderr=(
-                            f"{result.stderr}\nNo metric matched pattern "
+                    result = mark_result_failed(
+                        result,
+                        reason=(
+                            "No metric matched pattern "
                             f"{config.commands.metric_pattern!r}."
-                        ).strip(),
-                        status="failed",
-                        metric_value=None,
+                        ),
+                    )
+                runtime_constraint_satisfied = self.runtime_constraint_satisfied(result)
+                if runtime_constraint_satisfied is False:
+                    result = mark_result_failed(
+                        result,
+                        reason=(
+                            "Runtime constraint violated. "
+                            f"Observed runtime {format_runtime_seconds(result.runtime_seconds)} "
+                            f"exceeds cap {format_runtime_seconds(self.runtime_cap_seconds)}."
+                        ),
                     )
                 last_result = result
+                can_promote_result = runtime_constraint_satisfied is not False
                 run_log_path = self.run_log_path(experiment_index, run_index)
                 run_log_path.write_text(result.stdout, encoding="utf-8")
                 finish_run(
@@ -628,7 +646,9 @@ class AutoResearch:
                     log_path=str(run_log_path.relative_to(self.repo_path)),
                     finished_at=utc_now(),
                 )
-                if metric_improved(result.metric_value, best_metric):
+                if can_promote_result and metric_improved(
+                    result.metric_value, best_metric
+                ):
                     best_metric = result.metric_value
                     best_result = result
                     save_worktree_snapshot(self.repo_path, best_snapshot_dir)
@@ -661,6 +681,13 @@ class AutoResearch:
                     previous_best_metric=previous_best_metric,
                     metric_improved=metric_did_improve,
                     changes_discarded=not metric_did_improve,
+                    baseline_runtime_seconds=self.baseline_runtime_seconds,
+                    runtime_cap_seconds=self.runtime_cap_seconds,
+                    runtime_constraint_satisfied=(
+                        self.runtime_constraint_satisfied(summary_source_result)
+                        if summary_source_result is not None
+                        else None
+                    ),
                 )
                 summary_path.write_text(summary_text, encoding="utf-8")
 
@@ -903,6 +930,9 @@ class AutoResearch:
             run_index=run_index,
             phase=phase,
             evaluation_command=config.commands.run,
+            runtime_constraint_text=(
+                self.build_runtime_constraint_text() if phase == "planning" else None
+            ),
         )
 
     def build_initial_planning_prompt(
@@ -925,6 +955,7 @@ class AutoResearch:
             ),
             database_path=str(self.database_path.relative_to(self.repo_path)),
             previous_best_metric=previous_best_metric,
+            runtime_constraint_text=self.build_runtime_constraint_text(),
         )
 
     def build_setup_prompt(self) -> str:
@@ -941,6 +972,9 @@ class AutoResearch:
         previous_best_metric: float | None,
         metric_improved: bool,
         changes_discarded: bool,
+        baseline_runtime_seconds: float | None = None,
+        runtime_cap_seconds: float | None = None,
+        runtime_constraint_satisfied: bool | None = None,
     ) -> str:
         return build_experiment_summary(
             summary,
@@ -948,6 +982,9 @@ class AutoResearch:
             previous_best_metric=previous_best_metric,
             metric_improved=metric_improved,
             changes_discarded=changes_discarded,
+            baseline_runtime_seconds=baseline_runtime_seconds,
+            runtime_cap_seconds=runtime_cap_seconds,
+            runtime_constraint_satisfied=runtime_constraint_satisfied,
         )
 
     def load_prompt_template(self) -> str:
@@ -959,6 +996,33 @@ class AutoResearch:
             raise RuntimeError("AutoResearch config has not been loaded")
         return self.config
 
+    def build_runtime_constraint_text(self) -> str | None:
+        return build_runtime_constraint_text(
+            runtime_cap_seconds=self.runtime_cap_seconds,
+            baseline_runtime_seconds=self.baseline_runtime_seconds,
+        )
+
+    def resolve_runtime_cap_seconds(
+        self, baseline_runtime_seconds: float | None
+    ) -> float | None:
+        runtime_limit = self.require_config().constraints.runtime
+        if runtime_limit is None:
+            return None
+        if isinstance(runtime_limit, (int, float)) and not isinstance(
+            runtime_limit, bool
+        ):
+            if baseline_runtime_seconds is None:
+                return None
+            return baseline_runtime_seconds * float(runtime_limit)
+        return parse_duration_to_seconds(runtime_limit)
+
+    def runtime_constraint_satisfied(self, result: CommandResult | None) -> bool | None:
+        if result is None or self.runtime_cap_seconds is None:
+            return None
+        if result.runtime_seconds is None:
+            return False
+        return result.runtime_seconds <= self.runtime_cap_seconds
+
     def validate_config(self) -> None:
         config = self.require_config()
         if config.experiments.max_experiments > 0:
@@ -967,6 +1031,19 @@ class AutoResearch:
             if not config.commands.metric_pattern:
                 raise ValueError(
                     "commands.metric_pattern must be configured for agent experiments"
+                )
+        runtime_limit = config.constraints.runtime
+        if runtime_limit is not None:
+            if isinstance(runtime_limit, (int, float)) and not isinstance(
+                runtime_limit, bool
+            ):
+                if runtime_limit <= 0:
+                    raise ValueError("constraints.runtime must be greater than zero")
+            elif isinstance(runtime_limit, str):
+                parse_duration_to_seconds(runtime_limit)
+            else:
+                raise ValueError(
+                    "constraints.runtime must be null, a float ratio, or a duration string"
                 )
 
 
@@ -987,6 +1064,60 @@ def metric_improved(candidate: float | None, reference: float | None) -> bool:
     return candidate > reference
 
 
+def parse_duration_to_seconds(value: str) -> float:
+    cleaned = value.strip().lower()
+    if not cleaned:
+        raise ValueError("constraints.runtime cannot be empty")
+    total_seconds = 0.0
+    position = 0
+    pattern = re.compile(r"(\d+(?:\.\d+)?)([hms])")
+    unit_order = {"h": 3, "m": 2, "s": 1}
+    previous_order = 4
+    for match in pattern.finditer(cleaned):
+        if match.start() != position:
+            raise ValueError(
+                "constraints.runtime must use duration strings like 30s, 5m, or 1h30m"
+            )
+        magnitude = float(match.group(1))
+        unit = match.group(2)
+        current_order = unit_order[unit]
+        if current_order >= previous_order:
+            raise ValueError(
+                "constraints.runtime duration units must be ordered from largest to smallest"
+            )
+        previous_order = current_order
+        if unit == "h":
+            total_seconds += magnitude * 3600
+        elif unit == "m":
+            total_seconds += magnitude * 60
+        else:
+            total_seconds += magnitude
+        position = match.end()
+    if position != len(cleaned) or total_seconds <= 0:
+        raise ValueError(
+            "constraints.runtime must use duration strings like 30s, 5m, or 1h30m"
+        )
+    return total_seconds
+
+
+def format_runtime_seconds(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}s"
+
+
+def mark_result_failed(result: CommandResult, *, reason: str) -> CommandResult:
+    return CommandResult(
+        command=result.command,
+        exit_code=result.exit_code,
+        stdout=result.stdout,
+        stderr=f"{result.stderr}\n{reason}".strip(),
+        status="failed",
+        metric_value=result.metric_value,
+        runtime_seconds=result.runtime_seconds,
+    )
+
+
 def run_command(
     command: str,
     *,
@@ -994,6 +1125,7 @@ def run_command(
     timeout_seconds: int,
     metric_pattern: str | None = None,
 ) -> CommandResult:
+    started_at = time.perf_counter()
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -1051,6 +1183,8 @@ def run_command(
     stderr_thread.join(timeout=1)
     stdout = "".join(stdout_parts)
     stderr = "".join(stderr_parts)
+    runtime_seconds = time.perf_counter() - started_at
+    metric_value = metric_value or parse_metric(stdout, metric_pattern)
 
     if timed_out:
         return CommandResult(
@@ -1059,7 +1193,8 @@ def run_command(
             stdout=stdout,
             stderr=stderr,
             status="timed_out",
-            metric_value=metric_value or parse_metric(stdout, metric_pattern),
+            metric_value=metric_value,
+            runtime_seconds=runtime_seconds,
         )
 
     status = "completed" if exit_code == 0 else "failed"
@@ -1069,7 +1204,8 @@ def run_command(
         stdout=stdout,
         stderr=stderr,
         status=status,
-        metric_value=metric_value or parse_metric(stdout, metric_pattern),
+        metric_value=metric_value,
+        runtime_seconds=runtime_seconds,
     )
 
 

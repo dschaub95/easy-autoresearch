@@ -84,11 +84,21 @@ agent:
   model: gpt-5.4-mini
   sandbox_mode: workspace-write
   prompt_template: .autoresearch/prompts/codex-system.md
+constraints:
+  runtime: null
 editable_paths: []
 readonly_paths: []
 ```
 
 Set `agent.model` to pass a specific Codex model via `codex exec -m <MODEL>`.
+
+`constraints.runtime` accepts:
+
+- `null` to disable runtime constraints
+- a number such as `1.1` to enforce a baseline-relative cap
+- a human-readable duration string such as `30s`, `5m`, or `1h30m`
+
+Runtime is always measured by easy-autoresearch as wall-clock elapsed time.
 
 ## Development
 
