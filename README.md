@@ -152,7 +152,7 @@ agent:
   sandbox_mode: workspace-write
   prompt_template: .autoresearch/prompts/codex-system.md
 constraints:
-  runtime: null
+  runtime: 1.1
 editable_paths: []
 readonly_paths: []
 ```
