@@ -132,7 +132,8 @@ class DashboardServer:
         return [
             sys.executable,
             "-m",
-            "easy_autoresearch.dashboard",
+            "easy_autoresearch.main",
+            "serve-dashboard",
             "--repo-path",
             str(self.repo_path),
             "--host",

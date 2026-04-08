@@ -17,7 +17,7 @@ from queue import Empty, Queue
 from typing import Literal
 
 from .agent import Codex, CodingAgent
-from .app.server import DashboardServer
+from .app.server import DashboardServer, run_dashboard_server
 from .config import (
     AutoResearchConfig,
     config_path,
@@ -1258,6 +1258,14 @@ def build_dashboard_stop_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_serve_dashboard_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="easy-autoresearch serve-dashboard")
+    parser.add_argument("--repo-path", type=Path, required=True)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    return parser
+
+
 def prompt_for_existing_setup(repo_path: Path) -> bool:
     while True:
         response = (
@@ -1327,12 +1335,25 @@ def run_dashboard_stop_command(argv: list[str] | None = None) -> int:
     return 0
 
 
+def run_serve_dashboard_command(argv: list[str] | None = None) -> int:
+    parser = build_serve_dashboard_parser()
+    args = parser.parse_args(argv)
+    run_dashboard_server(
+        repo_path=args.repo_path.resolve(),
+        host=args.host,
+        port=args.port,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "dashboard":
         return run_dashboard_command(argv[1:])
     if argv and argv[0] == "dashboard-stop":
         return run_dashboard_stop_command(argv[1:])
+    if argv and argv[0] == "serve-dashboard":
+        return run_serve_dashboard_command(argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     autoresearch = AutoResearch(
@@ -1358,3 +1379,7 @@ def main(argv: list[str] | None = None) -> int:
             autoresearch.stop_dashboard()
         except RuntimeError:
             pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
