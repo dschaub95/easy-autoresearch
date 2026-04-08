@@ -14,6 +14,73 @@ Current scope:
 This is intentionally pre-AI scaffolding. The loop runs configured subprocesses
 and stores the outputs, but it does not yet ask Codex to propose code changes.
 
+## How it works
+
+1. **Resolve setup.** The tool uses the repo path (argument or current working directory). If `autoresearch.yaml` already exists, you can continue or overwrite; otherwise it scaffolds defaults (config, SQLite DB, prompt template).
+
+2. **Scaffold (new repos only).** It writes `autoresearch.yaml`, initializes `.autoresearch/state.db`, and adds `.autoresearch/prompts/codex-system.md`. You can pause after a config review prompt unless `-y` is used.
+
+   - **First-time agent setup (only after a fresh scaffold):** If this run created the scaffold, the configured coding agent runs a setup pass on the repo, then (when there are changes) generates a commit message and creates a setup commit. You can cancel after reviewing that change unless `-y` is used.
+
+3. **Open a session.** With a valid config, the tool creates a `sessions` row in SQLite (linked to the setup commit when present) and records limits such as `session.max_duration_seconds`.
+
+4. **Baseline experiment.** One run executes the configured `commands.run` with no agent. It captures stdout/stderr, exit status, an optional metric from `metric_pattern`, and wall-clock runtime. That runtime seeds an optional **runtime cap** when `constraints.runtime` is set (baseline-relative or absolute).
+
+5. **Candidate experiments (loop).** If `experiments.max_experiments` is zero, this block is skipped and a successful baseline alone can complete the session. Otherwise, for each experiment up to that limit, the tool records the current HEAD as the base commit, then:
+
+   - **Initial planning:** A single **initial_planning** agent step runs. If it fails, uncommitted work is discarded and the experiment is recorded as failed.
+   - **Runs within an experiment:** For each run up to `experiments.max_runs_per_experiment`, the worktree is reset from the best-so-far snapshot (or uncommitted changes are discarded) before trying again. Each run runs three agent phases in order—**planning**, **execution**, **issue_resolution**—using the same Codex (or configured) session. If any phase fails, that run fails and the loop may retry.
+   - **Evaluation:** After the three phases succeed, the same `commands.run` used for the baseline runs again. The result must yield a metric when `metric_pattern` is set, and must satisfy the runtime cap when configured. The best metric seen in this experiment is kept via a **worktree snapshot** so retries can roll back and retry from a known-good tree.
+   - **End of experiment:** The tool writes an experiment summary (agent-assisted), then either **commits** all changes if the metric improved versus the session’s best so far, or **discards** uncommitted changes. Session best metric updates when a candidate improves it.
+
+6. **Finish.** The session completes when the baseline succeeds with no candidates (`max_experiments: 0`), or when a candidate experiment completes successfully (`commands.run` exits cleanly under the recorded constraints). Otherwise it ends after all configured attempts. Every step above is persisted: sessions, experiments, runs, and per-phase agent steps in SQLite, with logs under `.autoresearch/logs/`.
+
+At a high level (pseudocode, not literal source):
+
+```text
+resolve_setup_and_maybe_scaffold()
+if fresh_scaffold:
+    agent_setup_repo()
+    maybe_commit_setup()
+
+open_session()  // SQLite sessions row
+
+baseline_result := run_evaluation_command()  // no agent; record metric + wall-clock runtime
+runtime_cap := optional_cap_from(baseline_result, constraints.runtime)
+session_best_metric := baseline_result.metric
+
+if max_experiments == 0 and baseline_result.success:
+    finish_session(completed); return
+
+for each candidate_experiment in 1 .. max_experiments:
+    record_base_commit()
+    if not agent_step(initial_planning):
+        discard_uncommitted(); continue experiment loop
+
+    for each run in 1 .. max_runs_per_experiment:
+        restore_best_snapshot_or_discard()
+        run planning, execution, issue_resolution agent steps (same session)
+        if any phase failed:
+            continue run loop
+        eval := run_evaluation_command()
+        if eval.success and metric_ok(eval) and within_runtime_cap(eval):
+            promote_if_best_in_experiment(eval)  // snapshot worktree when metric improves
+        if eval.success:
+            break run loop  // candidate experiment succeeded
+
+    write_summary_via_agent()
+    if metric_improved_vs_session_best:
+        commit_all_changes()
+        session_best_metric := best_metric
+    else:
+        discard_uncommitted()
+
+    if candidate_experiment succeeded:
+        finish_session(completed); return
+
+finish_session(failed_or_exhausted)
+```
+
 ## CLI
 
 ```bash
