@@ -38,6 +38,7 @@ from .git import (
     has_uncommitted_changes,
     restore_worktree_snapshot,
     save_worktree_snapshot,
+    switch_to_session_branch,
 )
 from .prompts import (
     CODEX_SYSTEM_PROMPT,
@@ -334,6 +335,8 @@ class AutoResearch:
                 started_at=started_at,
                 created_at=started_at,
             )
+            session_branch = switch_to_session_branch(self.repo_path, session_id)
+            print(f"Switched to session branch {session_branch}")
             print("Running baseline experiment")
 
             experiment_count = 0

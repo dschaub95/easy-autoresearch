@@ -84,6 +84,7 @@ def fake_git_tracking(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
         "discard_calls": 0,
         "restore_calls": 0,
         "commit_messages": [],
+        "session_branch_calls": [],
     }
 
     monkeypatch.setattr("easy_autoresearch.main.ensure_clean_tracking", lambda _: None)
@@ -110,6 +111,12 @@ def fake_git_tracking(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
         messages.append(message)
         return f"commit-{len(messages)}"
 
+    def fake_switch_to_session_branch(_: Path, session_id: int) -> str:
+        calls = state["session_branch_calls"]
+        assert isinstance(calls, list)
+        calls.append(session_id)
+        return f"autoresearch/session-{session_id}"
+
     monkeypatch.setattr(
         "easy_autoresearch.main.discard_uncommitted_changes", fake_discard
     )
@@ -118,11 +125,17 @@ def fake_git_tracking(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
         "easy_autoresearch.main.restore_worktree_snapshot", fake_restore
     )
     monkeypatch.setattr("easy_autoresearch.main.commit_all_changes", fake_commit)
+    monkeypatch.setattr(
+        "easy_autoresearch.main.switch_to_session_branch",
+        fake_switch_to_session_branch,
+    )
     return state
 
 
 def test_run_scaffolds_and_starts_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_tracking: dict[str, object],
 ) -> None:
     repo_path = tmp_path / "target-repo"
     results = command_results(
@@ -189,6 +202,7 @@ def test_run_scaffolds_and_starts_session(
         ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
         ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
     ]
+    assert fake_git_tracking["session_branch_calls"] == [1]
 
 
 def test_setup_can_be_cancelled_for_config_review(
@@ -1160,6 +1174,31 @@ def test_run_session_fails_fast_for_dirty_git_worktree(
 
     assert exit_code == 1
     assert not db_path(repo_path).exists()
+
+
+def test_run_session_fails_fast_for_existing_session_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path = tmp_path / "project"
+
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.switch_to_session_branch",
+        lambda _, __: (_ for _ in ()).throw(
+            GitWorktreeError(
+                "Session branch autoresearch/session-1 already exists. Remove it before starting a new session."
+            )
+        ),
+    )
+    responses = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+
+    exit_code = main(["--headless", str(repo_path)])
+
+    assert exit_code == 1
 
 
 def test_run_overwrites_existing_setup(

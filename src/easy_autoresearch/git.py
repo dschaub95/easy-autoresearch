@@ -11,6 +11,7 @@ EXCLUDED_PATHSPECS = (
     ":(exclude).autoresearch",
     ":(exclude).codex/autoresearch.yaml",
 )
+SESSION_BRANCH_PREFIX = "autoresearch/session"
 
 
 class GitWorktreeError(RuntimeError):
@@ -67,6 +68,23 @@ def has_uncommitted_changes(repo_path: Path) -> bool:
 
 def current_head_sha(repo_path: Path) -> str:
     return _run_git(repo_path, "rev-parse", "HEAD").stdout.strip()
+
+
+def session_branch_name(session_id: int) -> str:
+    return f"{SESSION_BRANCH_PREFIX}-{session_id}"
+
+
+def switch_to_session_branch(repo_path: Path, session_id: int) -> str:
+    branch_name = session_branch_name(session_id)
+    existing_branch = _run_git(
+        repo_path, "branch", "--list", branch_name
+    ).stdout.strip()
+    if existing_branch:
+        raise GitWorktreeError(
+            f"Session branch {branch_name} already exists. Remove it before starting a new session."
+        )
+    _run_git(repo_path, "switch", "-c", branch_name)
+    return branch_name
 
 
 def discard_uncommitted_changes(repo_path: Path) -> None:
