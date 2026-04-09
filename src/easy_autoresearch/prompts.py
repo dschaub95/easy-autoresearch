@@ -14,7 +14,7 @@ CODEX_SYSTEM_PROMPT = ""
 AGENT_PHASE_INSTRUCTIONS: dict[AgentPhase, str] = {
     "planning": (
         "Inspect the codebase and produce a concise implementation plan for "
-        "the most promising change to make this experiment a success. Do not edit files yet."
+        "the most promising change to make this experiment a success. Do not edit files at this point."
     ),
     "execution": (
         "Implement the planned changes. Try to keep the changes minimal, while balancing for maintainability. "
@@ -49,8 +49,8 @@ def build_agent_phase_prompt(
 def build_initial_planning_prompt(
     template: str | None,
     *,
-    experiment_index: int,
     evaluation_command: str,
+    metric_pattern: str | None,
     summary_dir: str,
     run_logs_dir: str,
     agent_logs_dir: str,
@@ -63,13 +63,25 @@ def build_initial_planning_prompt(
         part
         for part in [
             template,
-            f"Experiment {experiment_index}, initial planning.",
             (
-                "This step is read-only. Do not edit any files yet. Choose one new "
-                "high-level idea to improve the evaluation metric."
+                "This experiment is part of a repeated local optimization process "
+                "with the aim to make meaningful changes to the codebase that "
+                f"improve the result of `{evaluation_command}` in a real end-to-end "
+                "run, so we can keep and commit the improvements. "
+                + (
+                    "Optimize exactly the scalar metric parsed from the evaluation "
+                    "command's stdout by `commands.metric_pattern` "
+                    f"(`{metric_pattern}`). Higher is better, and improvement means "
+                    "a strict increase over the previous best metric of "
+                    f"{format_metric(previous_best_metric)}."
+                    if metric_pattern
+                    else "Optimize exactly the scalar metric produced by the evaluation command. Higher is better."
+                )
             ),
-            f"Start by carefully reading all summary markdown files under `{summary_dir}`.",
-            f"The evaluation command is `{evaluation_command}`.",
+            (
+                "Start by carefully reading all summary markdown files of previous experiments under "
+                f"`{summary_dir}`."
+            ),
             f"Previous best metric: {format_metric(previous_best_metric)}.",
             runtime_constraint_text,
             (
@@ -89,6 +101,10 @@ def build_initial_planning_prompt(
                 f"- Agent stderr logs: `{agent_stderr_logs_dir}`\n"
                 f"- SQLite state database: `{database_path}`"
             ),
+            (
+                "This step is read-only. Do not edit any files yet. Come up with one new "
+                "high-level idea to improve the evaluation metric."
+            ),
         ]
         if part
     )
@@ -100,7 +116,8 @@ def build_setup_prompt() -> str:
             "Prepare this repository for repeated local optimization of its end-to-end workflow.",
             (
                 "If necessary create or adjust a clear local run command that can "
-                "be run AS IS (this is important) and that generally includes both training and "
+                "be run as is (this has to be exactly the command that you use to run the code including sandbox related additions) "
+                "and that generally includes both training and "
                 "evaluation. Ensure it prints at least one meaningful scalar "
                 "metric to stdout, and update autoresearch.yaml (untracked) so commands.run "
                 "is that command and commands.metric_pattern matches that metric."

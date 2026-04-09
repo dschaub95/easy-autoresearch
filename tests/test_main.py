@@ -895,12 +895,24 @@ def test_run_uses_coding_agent_for_candidate_experiments(
     ]
     assert agent_steps[-1][:4] == (1, "commit_message", "completed", "sess-123")
     assert agent_steps[-5][:4] == (0, "initial_planning", "completed", "sess-123")
-    assert "Experiment 2, initial planning." in agent_steps[-5][4]
     assert "template marker" in agent_steps[-5][4]
     assert (
-        "Start by carefully reading all summary markdown files under `.autoresearch/logs/summaries`."
-        in agent_steps[-5][4]
+        "This experiment is part of a repeated local optimization process with "
+        "the aim to make meaningful changes to the codebase that improve the "
+        "result of `python -c \"print('metric: 3.0')\"` in a real end-to-end "
+        "run, so we can keep and commit the improvements." in agent_steps[-5][4]
     )
+    assert (
+        "Optimize exactly the scalar metric parsed from the evaluation command's "
+        "stdout by `commands.metric_pattern` (`^metric:\\s+([\\d.]+)`). Higher "
+        "is better, and improvement means a strict increase over the previous "
+        "best metric of 2.0." in agent_steps[-5][4]
+    )
+    assert (
+        "Start by carefully reading all summary markdown files of previous experiments under "
+        "`.autoresearch/logs/summaries`." in agent_steps[-5][4]
+    )
+    assert "The evaluation command is" not in agent_steps[-5][4]
     assert "- Run stdout logs: `.autoresearch/logs/runs`" in agent_steps[-5][4]
     assert "- Agent transcripts: `.autoresearch/logs/agent`" in agent_steps[-5][4]
     assert (

@@ -1034,8 +1034,8 @@ class AutoResearch:
         config = self.require_config()
         return build_initial_planning_prompt(
             template,
-            experiment_index=experiment_index,
             evaluation_command=config.commands.run,
+            metric_pattern=config.commands.metric_pattern,
             summary_dir=str(self.summary_logs_dir.relative_to(self.repo_path)),
             run_logs_dir=str(self.run_logs_dir.relative_to(self.repo_path)),
             agent_logs_dir=str(self.agent_logs_dir.relative_to(self.repo_path)),
