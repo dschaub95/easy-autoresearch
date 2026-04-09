@@ -979,7 +979,15 @@ def test_runtime_constraint_is_included_in_planning_prompts(tmp_path: Path) -> N
 
     assert "Hard runtime constraint" in initial_prompt
     assert "Current runtime cap: 11.000s." in initial_prompt
+    assert (
+        "When you need to inspect end-to-end runtime manually, prefer "
+        "`/usr/bin/time -p uv run pytest`." in initial_prompt
+    )
     assert "Hard runtime constraint" in phase_prompt
+    assert (
+        "For manual runtime inspection, prefer running "
+        "`/usr/bin/time -p uv run pytest`." in phase_prompt
+    )
 
 
 def test_runtime_constraint_blocks_metric_promotion(

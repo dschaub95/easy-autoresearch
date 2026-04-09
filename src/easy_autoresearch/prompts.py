@@ -26,6 +26,10 @@ AGENT_PHASE_INSTRUCTIONS: dict[AgentPhase, str] = {
 }
 
 
+def timed_evaluation_command(command: str) -> str:
+    return f"/usr/bin/time -p {command}"
+
+
 def build_agent_phase_prompt(
     *,
     experiment_index: int,
@@ -40,6 +44,10 @@ def build_agent_phase_prompt(
             f"Experiment {experiment_index}, attempt {run_index}, phase: {phase}.",
             AGENT_PHASE_INSTRUCTIONS[phase],
             f"The evaluation command is `{evaluation_command}`.",
+            (
+                "For manual runtime inspection, prefer running "
+                f"`{timed_evaluation_command(evaluation_command)}`."
+            ),
             runtime_constraint_text,
         ]
         if part
@@ -77,6 +85,10 @@ def build_initial_planning_prompt(
                     if metric_pattern
                     else "Optimize exactly the scalar metric produced by the evaluation command. Higher is better."
                 )
+            ),
+            (
+                "When you need to inspect end-to-end runtime manually, prefer "
+                f"`{timed_evaluation_command(evaluation_command)}`."
             ),
             (
                 "Start by carefully reading all summary markdown files of previous experiments under "
