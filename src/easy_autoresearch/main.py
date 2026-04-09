@@ -111,6 +111,26 @@ class ExperimentResult:
     metric_improved: bool = False
     changes_discarded: bool = False
     commit_sha: str | None = None
+    failure_reason: str | None = None
+
+
+class AgentSessionResumeError(RuntimeError):
+    """Raised when an experiment agent call cannot resume the expected session."""
+
+
+class ExperimentStepError(RuntimeError):
+    """Raised when an experiment-only agent step fails after runs complete."""
+
+
+def append_error(stderr: str, error: str) -> str:
+    if not stderr:
+        return f"{error}\n"
+    return f"{stderr.rstrip()}\n{error}\n"
+
+
+def last_error_line(stderr: str) -> str | None:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    return lines[-1] if lines else None
 
 
 def create_agent(config: AutoResearchConfig, repo_path: Path) -> CodingAgent:
@@ -428,68 +448,82 @@ class AutoResearch:
             experiment_count = 0
             total_run_count = 0
             session_status = "failed"
-
-            baseline_started_at = utc_now()
-            baseline_experiment_id = create_experiment(
-                connection,
-                session_id=session_id,
-                kind="baseline",
-                description="Initial baseline execution",
-                max_runs=1,
-                status="running",
-                agent_provider=None,
-                created_at=baseline_started_at,
-                updated_at=baseline_started_at,
-            )
-            baseline_result = self.run_baseline_experiment(
-                connection,
-                experiment_id=baseline_experiment_id,
-                experiment_index=1,
-            )
-            self.baseline_runtime_seconds = baseline_result.best_runtime_seconds
-            self.runtime_cap_seconds = self.resolve_runtime_cap_seconds(
-                self.baseline_runtime_seconds
-            )
-            session_best_metric = baseline_result.best_metric
-            total_run_count += baseline_result.run_count
-            if (
-                baseline_result.status == "completed"
-                and config.experiments.max_experiments == 0
-            ):
-                session_status = "completed"
-
-            for experiment_index in range(1, config.experiments.max_experiments + 1):
-                experiment_count += 1
-                experiment_started_at = utc_now()
-                base_commit_sha = current_head_sha(self.repo_path)
-                experiment_id = create_experiment(
+            try:
+                baseline_started_at = utc_now()
+                baseline_experiment_id = create_experiment(
                     connection,
                     session_id=session_id,
-                    kind="candidate",
-                    description=f"Candidate experiment {experiment_index}",
-                    max_runs=config.experiments.max_runs_per_experiment,
+                    kind="baseline",
+                    description="Initial baseline execution",
+                    max_runs=1,
                     status="running",
-                    agent_provider=config.agent.provider,
-                    previous_best_metric=session_best_metric,
-                    base_commit_sha=base_commit_sha,
-                    created_at=experiment_started_at,
-                    updated_at=experiment_started_at,
+                    agent_provider=None,
+                    created_at=baseline_started_at,
+                    updated_at=baseline_started_at,
                 )
-                print(f"Running candidate experiment {experiment_index}")
-                experiment_result = self.run_agent_experiment(
+                baseline_result = self.run_baseline_experiment(
                     connection,
-                    experiment_id=experiment_id,
-                    experiment_index=experiment_index,
-                    previous_best_metric=session_best_metric,
-                    base_commit_sha=base_commit_sha,
+                    experiment_id=baseline_experiment_id,
+                    experiment_index=1,
                 )
-                total_run_count += experiment_result.run_count
-                if experiment_result.metric_improved:
-                    session_best_metric = experiment_result.best_metric
-                if experiment_result.status == "completed":
+                self.baseline_runtime_seconds = baseline_result.best_runtime_seconds
+                self.runtime_cap_seconds = self.resolve_runtime_cap_seconds(
+                    self.baseline_runtime_seconds
+                )
+                session_best_metric = baseline_result.best_metric
+                total_run_count += baseline_result.run_count
+                if (
+                    baseline_result.status == "completed"
+                    and config.experiments.max_experiments == 0
+                ):
                     session_status = "completed"
-                    break
 
+                for experiment_index in range(
+                    1, config.experiments.max_experiments + 1
+                ):
+                    experiment_count += 1
+                    experiment_started_at = utc_now()
+                    base_commit_sha = current_head_sha(self.repo_path)
+                    experiment_id = create_experiment(
+                        connection,
+                        session_id=session_id,
+                        kind="candidate",
+                        description=f"Candidate experiment {experiment_index}",
+                        max_runs=config.experiments.max_runs_per_experiment,
+                        status="running",
+                        agent_provider=config.agent.provider,
+                        previous_best_metric=session_best_metric,
+                        base_commit_sha=base_commit_sha,
+                        created_at=experiment_started_at,
+                        updated_at=experiment_started_at,
+                    )
+                    print(f"Running candidate experiment {experiment_index}")
+                    experiment_result = self.run_agent_experiment(
+                        connection,
+                        experiment_id=experiment_id,
+                        experiment_index=experiment_index,
+                        previous_best_metric=session_best_metric,
+                        base_commit_sha=base_commit_sha,
+                    )
+                    total_run_count += experiment_result.run_count
+                    if experiment_result.metric_improved:
+                        session_best_metric = experiment_result.best_metric
+                    if experiment_result.status == "completed":
+                        session_status = "completed"
+                        break
+                    if experiment_result.failure_reason:
+                        print(
+                            f"Experiment {experiment_index} failed: "
+                            f"{experiment_result.failure_reason}"
+                        )
+            except Exception:
+                finish_session(
+                    connection,
+                    session_id=session_id,
+                    status="failed",
+                    finished_at=utc_now(),
+                )
+                raise
             finish_session(
                 connection,
                 session_id=session_id,
@@ -555,6 +589,7 @@ class AutoResearch:
             best_metric=result.metric_value,
             run_count=1,
             best_runtime_seconds=result.runtime_seconds,
+            failure_reason=last_error_line(result.stderr),
         )
 
     def run_agent_experiment(
@@ -569,6 +604,7 @@ class AutoResearch:
         config = self.require_config()
         agent = create_agent(config, self.repo_path)
         template = self.load_prompt_template()
+        experiment_session_id: str | None = None
         best_metric: float | None = None
         experiment_status = "failed"
         run_count = 0
@@ -576,26 +612,293 @@ class AutoResearch:
         last_agent_log_path: Path | None = None
         last_agent_stderr_path: Path | None = None
         last_result: CommandResult | None = None
-        initial_planning_result = self.run_initial_planning_step(
-            connection,
-            agent=agent,
-            template=template,
-            experiment_id=experiment_id,
-            experiment_index=experiment_index,
-            previous_best_metric=previous_best_metric,
-        )
-        if initial_planning_result is not None:
-            last_agent_log_path = initial_planning_result.log_path
-            last_agent_stderr_path = initial_planning_result.stderr_path
-        if (
-            initial_planning_result is not None
-            and initial_planning_result.status != "completed"
-        ):
+        failure_reason: str | None = None
+        active_run_id: int | None = None
+        active_run_finished = False
+        try:
+            initial_planning_result = self.run_initial_planning_step(
+                connection,
+                agent=agent,
+                template=template,
+                experiment_id=experiment_id,
+                experiment_index=experiment_index,
+                previous_best_metric=previous_best_metric,
+            )
+            if initial_planning_result is not None:
+                last_agent_log_path = initial_planning_result.log_path
+                last_agent_stderr_path = initial_planning_result.stderr_path
+                experiment_session_id = initial_planning_result.agent_session_id
+            if (
+                initial_planning_result is not None
+                and initial_planning_result.status != "completed"
+            ):
+                discard_uncommitted_changes(self.repo_path)
+                update_experiment(
+                    connection,
+                    experiment_id=experiment_id,
+                    status=experiment_status,
+                    updated_at=utc_now(),
+                    best_metric=best_metric,
+                    previous_best_metric=previous_best_metric,
+                    metric_improved=False,
+                    changes_discarded=True,
+                    agent_session_id=agent.session_id,
+                    base_commit_sha=base_commit_sha,
+                    agent_log_path=(
+                        str(last_agent_log_path.relative_to(self.repo_path))
+                        if last_agent_log_path is not None
+                        else None
+                    ),
+                    agent_stderr_path=(
+                        str(last_agent_stderr_path.relative_to(self.repo_path))
+                        if last_agent_stderr_path is not None
+                        else None
+                    ),
+                )
+                return ExperimentResult(
+                    status=experiment_status,
+                    best_metric=best_metric,
+                    run_count=run_count,
+                    previous_best_metric=previous_best_metric,
+                    metric_improved=False,
+                    changes_discarded=True,
+                    failure_reason=last_error_line(initial_planning_result.stderr),
+                )
+            with tempfile.TemporaryDirectory(
+                prefix="experiment-", dir=self.state_dir
+            ) as tmp:
+                best_snapshot_dir = Path(tmp) / "best"
+                for run_index in range(
+                    1, config.experiments.max_runs_per_experiment + 1
+                ):
+                    if run_index > 1:
+                        if best_snapshot_dir.exists():
+                            restore_worktree_snapshot(self.repo_path, best_snapshot_dir)
+                        else:
+                            discard_uncommitted_changes(self.repo_path)
+                    run_count += 1
+                    run_started_at = utc_now()
+                    run_id = create_run(
+                        connection,
+                        experiment_id=experiment_id,
+                        run_index=run_index,
+                        command=config.commands.run,
+                        status="running",
+                        started_at=run_started_at,
+                        created_at=run_started_at,
+                    )
+                    active_run_id = run_id
+                    active_run_finished = False
+                    print(
+                        f"Candidate run {run_index}/{config.experiments.max_runs_per_experiment}"
+                    )
+                    phase_results = self.run_agent_phases(
+                        connection,
+                        agent=agent,
+                        experiment_id=experiment_id,
+                        experiment_index=experiment_index,
+                        run_index=run_index,
+                        expected_session_id=experiment_session_id,
+                    )
+                    if phase_results:
+                        last_agent_log_path = phase_results[-1].log_path
+                        last_agent_stderr_path = phase_results[-1].stderr_path
+                    if not phase_results or any(
+                        phase_result.status != "completed"
+                        for phase_result in phase_results
+                    ):
+                        failure_reason = next(
+                            (
+                                last_error_line(phase_result.stderr)
+                                or last_error_line(phase_result.response_text)
+                                for phase_result in phase_results
+                                if phase_result.status != "completed"
+                            ),
+                            None,
+                        )
+                        finish_run(
+                            connection,
+                            run_id=run_id,
+                            status="failed",
+                            exit_code=(
+                                next(
+                                    (
+                                        phase_result.exit_code
+                                        for phase_result in phase_results
+                                        if phase_result.status != "completed"
+                                    ),
+                                    1,
+                                )
+                                if phase_results
+                                else 1
+                            ),
+                            stdout="\n\n".join(
+                                phase_result.response_text
+                                for phase_result in phase_results
+                                if phase_result.response_text
+                            ),
+                            stderr="\n\n".join(
+                                phase_result.stderr
+                                for phase_result in phase_results
+                                if phase_result.stderr
+                            ),
+                            metric_value=None,
+                            log_path=(
+                                str(last_agent_log_path.relative_to(self.repo_path))
+                                if last_agent_log_path is not None
+                                else None
+                            ),
+                            finished_at=utc_now(),
+                        )
+                        active_run_finished = True
+                        continue
+
+                    result = run_command(
+                        config.commands.run,
+                        cwd=self.repo_path,
+                        timeout_seconds=config.session.max_duration_seconds,
+                        metric_pattern=config.commands.metric_pattern,
+                    )
+                    print("Evaluation finished")
+                    if result.metric_value is None:
+                        result = mark_result_failed(
+                            result,
+                            reason=(
+                                "No metric matched pattern "
+                                f"{config.commands.metric_pattern!r}."
+                            ),
+                        )
+                    runtime_constraint_satisfied = self.runtime_constraint_satisfied(
+                        result
+                    )
+                    if runtime_constraint_satisfied is False:
+                        result = mark_result_failed(
+                            result,
+                            reason=(
+                                "Runtime constraint violated. "
+                                f"Observed runtime {format_runtime_seconds(result.runtime_seconds)} "
+                                f"exceeds cap {format_runtime_seconds(self.runtime_cap_seconds)}."
+                            ),
+                        )
+                    last_result = result
+                    can_promote_result = runtime_constraint_satisfied is not False
+                    run_log_path = self.run_log_path(experiment_index, run_index)
+                    run_log_path.write_text(result.stdout, encoding="utf-8")
+                    finish_run(
+                        connection,
+                        run_id=run_id,
+                        status=result.status,
+                        exit_code=result.exit_code,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        metric_value=result.metric_value,
+                        log_path=str(run_log_path.relative_to(self.repo_path)),
+                        finished_at=utc_now(),
+                    )
+                    active_run_finished = True
+                    if can_promote_result and metric_improved(
+                        result.metric_value, best_metric
+                    ):
+                        best_metric = result.metric_value
+                        best_result = result
+                        save_worktree_snapshot(self.repo_path, best_snapshot_dir)
+                    if result.status == "completed":
+                        experiment_status = "completed"
+                        break
+                    failure_reason = last_error_line(result.stderr)
+
+                metric_did_improve = metric_improved(best_metric, previous_best_metric)
+                if metric_did_improve and best_snapshot_dir.exists():
+                    restore_worktree_snapshot(self.repo_path, best_snapshot_dir)
+
+                summary_text: str | None = None
+                summary_path: Path | None = None
+                summary_source_result = (
+                    best_result if metric_did_improve else last_result
+                )
+                print(f"Writing summary for experiment {experiment_index}")
+                summary_path = self.summary_path_for_experiment(experiment_index)
+                summary_output_path, summary_stderr_path = self.agent_artifact_paths(
+                    f"experiment-{experiment_index}.summary"
+                )
+                summary_result = agent.run(
+                    self.build_summary_prompt(summary_source_result),
+                    output_path=summary_output_path,
+                    stderr_path=summary_stderr_path,
+                    timeout_seconds=config.session.max_duration_seconds,
+                )
+                last_agent_log_path = summary_output_path
+                last_agent_stderr_path = summary_stderr_path
+                if summary_result.exit_code != 0:
+                    raise ExperimentStepError(
+                        "Agent failed to produce an experiment summary."
+                    )
+                try:
+                    self.require_agent_session_id(
+                        expected_session_id=experiment_session_id,
+                        returned_session_id=summary_result.session_id,
+                        phase="summary",
+                    )
+                except RuntimeError as error:
+                    summary_stderr = append_error(summary_result.stderr, str(error))
+                    summary_stderr_path.write_text(summary_stderr, encoding="utf-8")
+                    raise AgentSessionResumeError(str(error)) from error
+                summary_text = self.build_experiment_summary(
+                    summary_result.text,
+                    summary_source_result,
+                    previous_best_metric=previous_best_metric,
+                    metric_improved=metric_did_improve,
+                    changes_discarded=not metric_did_improve,
+                    baseline_runtime_seconds=self.baseline_runtime_seconds,
+                    runtime_cap_seconds=self.runtime_cap_seconds,
+                    runtime_constraint_satisfied=(
+                        self.runtime_constraint_satisfied(summary_source_result)
+                        if summary_source_result is not None
+                        else None
+                    ),
+                )
+                summary_path.write_text(summary_text, encoding="utf-8")
+
+                commit_sha: str | None = None
+                if metric_did_improve:
+                    commit_message = self.run_commit_message_step(
+                        connection,
+                        agent=agent,
+                        experiment_id=experiment_id,
+                        experiment_index=experiment_index,
+                        run_index=run_count,
+                        expected_session_id=experiment_session_id,
+                    )
+                    commit_sha = commit_all_changes(self.repo_path, commit_message)
+                else:
+                    discard_uncommitted_changes(self.repo_path)
+        except (AgentSessionResumeError, ExperimentStepError) as error:
+            if active_run_id is not None and not active_run_finished:
+                finish_run(
+                    connection,
+                    run_id=active_run_id,
+                    status="failed",
+                    exit_code=1,
+                    stdout="",
+                    stderr=(
+                        last_agent_stderr_path.read_text(encoding="utf-8")
+                        if last_agent_stderr_path is not None
+                        and last_agent_stderr_path.exists()
+                        else ""
+                    ),
+                    metric_value=None,
+                    log_path=(
+                        str(last_agent_log_path.relative_to(self.repo_path))
+                        if last_agent_log_path is not None
+                        else None
+                    ),
+                    finished_at=utc_now(),
+                )
             discard_uncommitted_changes(self.repo_path)
             update_experiment(
                 connection,
                 experiment_id=experiment_id,
-                status=experiment_status,
+                status="failed",
                 updated_at=utc_now(),
                 best_metric=best_metric,
                 previous_best_metric=previous_best_metric,
@@ -614,184 +917,8 @@ class AutoResearch:
                     else None
                 ),
             )
-            return ExperimentResult(
-                status=experiment_status,
-                best_metric=best_metric,
-                run_count=run_count,
-                previous_best_metric=previous_best_metric,
-                metric_improved=False,
-                changes_discarded=True,
-            )
-        with tempfile.TemporaryDirectory(
-            prefix="experiment-", dir=self.state_dir
-        ) as tmp:
-            best_snapshot_dir = Path(tmp) / "best"
-            for run_index in range(1, config.experiments.max_runs_per_experiment + 1):
-                if run_index > 1:
-                    if best_snapshot_dir.exists():
-                        restore_worktree_snapshot(self.repo_path, best_snapshot_dir)
-                    else:
-                        discard_uncommitted_changes(self.repo_path)
-                run_count += 1
-                run_started_at = utc_now()
-                run_id = create_run(
-                    connection,
-                    experiment_id=experiment_id,
-                    run_index=run_index,
-                    command=config.commands.run,
-                    status="running",
-                    started_at=run_started_at,
-                    created_at=run_started_at,
-                )
-                print(
-                    f"Candidate run {run_index}/{config.experiments.max_runs_per_experiment}"
-                )
-                phase_results = self.run_agent_phases(
-                    connection,
-                    agent=agent,
-                    experiment_id=experiment_id,
-                    experiment_index=experiment_index,
-                    run_index=run_index,
-                )
-                if phase_results:
-                    last_agent_log_path = phase_results[-1].log_path
-                    last_agent_stderr_path = phase_results[-1].stderr_path
-                if not phase_results or any(
-                    phase_result.status != "completed" for phase_result in phase_results
-                ):
-                    finish_run(
-                        connection,
-                        run_id=run_id,
-                        status="failed",
-                        exit_code=(
-                            next(
-                                (
-                                    phase_result.exit_code
-                                    for phase_result in phase_results
-                                    if phase_result.status != "completed"
-                                ),
-                                1,
-                            )
-                            if phase_results
-                            else 1
-                        ),
-                        stdout="\n\n".join(
-                            phase_result.response_text
-                            for phase_result in phase_results
-                            if phase_result.response_text
-                        ),
-                        stderr="\n\n".join(
-                            phase_result.stderr
-                            for phase_result in phase_results
-                            if phase_result.stderr
-                        ),
-                        metric_value=None,
-                        log_path=(
-                            str(last_agent_log_path.relative_to(self.repo_path))
-                            if last_agent_log_path is not None
-                            else None
-                        ),
-                        finished_at=utc_now(),
-                    )
-                    continue
-
-                result = run_command(
-                    config.commands.run,
-                    cwd=self.repo_path,
-                    timeout_seconds=config.session.max_duration_seconds,
-                    metric_pattern=config.commands.metric_pattern,
-                )
-                print("Evaluation finished")
-                if result.metric_value is None:
-                    result = mark_result_failed(
-                        result,
-                        reason=(
-                            "No metric matched pattern "
-                            f"{config.commands.metric_pattern!r}."
-                        ),
-                    )
-                runtime_constraint_satisfied = self.runtime_constraint_satisfied(result)
-                if runtime_constraint_satisfied is False:
-                    result = mark_result_failed(
-                        result,
-                        reason=(
-                            "Runtime constraint violated. "
-                            f"Observed runtime {format_runtime_seconds(result.runtime_seconds)} "
-                            f"exceeds cap {format_runtime_seconds(self.runtime_cap_seconds)}."
-                        ),
-                    )
-                last_result = result
-                can_promote_result = runtime_constraint_satisfied is not False
-                run_log_path = self.run_log_path(experiment_index, run_index)
-                run_log_path.write_text(result.stdout, encoding="utf-8")
-                finish_run(
-                    connection,
-                    run_id=run_id,
-                    status=result.status,
-                    exit_code=result.exit_code,
-                    stdout=result.stdout,
-                    stderr=result.stderr,
-                    metric_value=result.metric_value,
-                    log_path=str(run_log_path.relative_to(self.repo_path)),
-                    finished_at=utc_now(),
-                )
-                if can_promote_result and metric_improved(
-                    result.metric_value, best_metric
-                ):
-                    best_metric = result.metric_value
-                    best_result = result
-                    save_worktree_snapshot(self.repo_path, best_snapshot_dir)
-                if result.status == "completed":
-                    experiment_status = "completed"
-                    break
-
-            metric_did_improve = metric_improved(best_metric, previous_best_metric)
-            if metric_did_improve and best_snapshot_dir.exists():
-                restore_worktree_snapshot(self.repo_path, best_snapshot_dir)
-
-            summary_text: str | None = None
-            summary_path: Path | None = None
-            summary_source_result = best_result if metric_did_improve else last_result
-            print(f"Writing summary for experiment {experiment_index}")
-            if agent.session_id:
-                summary_path = self.summary_path_for_experiment(experiment_index)
-                summary_output_path, summary_stderr_path = self.agent_artifact_paths(
-                    f"experiment-{experiment_index}.summary"
-                )
-                summary_result = agent.run(
-                    self.build_summary_prompt(summary_source_result),
-                    output_path=summary_output_path,
-                    stderr_path=summary_stderr_path,
-                    timeout_seconds=config.session.max_duration_seconds,
-                )
-                summary_text = self.build_experiment_summary(
-                    summary_result.text,
-                    summary_source_result,
-                    previous_best_metric=previous_best_metric,
-                    metric_improved=metric_did_improve,
-                    changes_discarded=not metric_did_improve,
-                    baseline_runtime_seconds=self.baseline_runtime_seconds,
-                    runtime_cap_seconds=self.runtime_cap_seconds,
-                    runtime_constraint_satisfied=(
-                        self.runtime_constraint_satisfied(summary_source_result)
-                        if summary_source_result is not None
-                        else None
-                    ),
-                )
-                summary_path.write_text(summary_text, encoding="utf-8")
-
-            commit_sha: str | None = None
-            if metric_did_improve:
-                commit_message = self.run_commit_message_step(
-                    connection,
-                    agent=agent,
-                    experiment_id=experiment_id,
-                    experiment_index=experiment_index,
-                    run_index=run_count,
-                )
-                commit_sha = commit_all_changes(self.repo_path, commit_message)
-            else:
-                discard_uncommitted_changes(self.repo_path)
+            failure_reason = str(error)
+            raise
 
         update_experiment(
             connection,
@@ -830,6 +957,7 @@ class AutoResearch:
             metric_improved=metric_did_improve,
             changes_discarded=not metric_did_improve,
             commit_sha=commit_sha,
+            failure_reason=failure_reason,
         )
 
     def run_initial_planning_step(
@@ -868,7 +996,23 @@ class AutoResearch:
             stderr_path=stderr_path,
             timeout_seconds=self.require_config().session.max_duration_seconds,
         )
+        step_stderr = result.stderr
         status = "completed" if result.exit_code == 0 else "failed"
+        if status == "completed":
+            try:
+                session_id = self.require_agent_session_id(
+                    expected_session_id=None,
+                    returned_session_id=result.session_id,
+                    phase="initial_planning",
+                )
+            except RuntimeError as error:
+                status = "failed"
+                session_id = result.session_id
+                step_stderr = append_error(step_stderr, str(error))
+            else:
+                agent.session_id = session_id
+        else:
+            session_id = result.session_id
         phase_result = AgentPhaseResult(
             phase="initial_planning",
             prompt=prompt,
@@ -877,21 +1021,23 @@ class AutoResearch:
             log_path=output_path,
             stderr_path=stderr_path,
             response_text=result.text,
-            stderr=result.stderr,
-            agent_session_id=result.session_id,
+            stderr=step_stderr,
+            agent_session_id=session_id,
         )
         finish_agent_step(
             connection,
             step_id=step_id,
             status=status,
             exit_code=result.exit_code,
-            agent_session_id=result.session_id,
+            agent_session_id=session_id,
             response_text=result.text,
-            stderr=result.stderr,
+            stderr=step_stderr,
             log_path=str(output_path.relative_to(self.repo_path)),
             stderr_path=str(stderr_path.relative_to(self.repo_path)),
             finished_at=utc_now(),
         )
+        if status == "failed" and result.exit_code == 0:
+            raise AgentSessionResumeError(step_stderr.strip())
         return phase_result
 
     def run_agent_phases(
@@ -902,6 +1048,7 @@ class AutoResearch:
         experiment_id: int,
         experiment_index: int,
         run_index: int,
+        expected_session_id: str | None,
     ) -> list[AgentPhaseResult]:
         config = self.require_config()
         phase_results: list[AgentPhaseResult] = []
@@ -928,7 +1075,23 @@ class AutoResearch:
                 stderr_path=stderr_path,
                 timeout_seconds=config.session.max_duration_seconds,
             )
+            step_stderr = result.stderr
             status = "completed" if result.exit_code == 0 else "failed"
+            if status == "completed":
+                try:
+                    session_id = self.require_agent_session_id(
+                        expected_session_id=expected_session_id,
+                        returned_session_id=result.session_id,
+                        phase=phase,
+                    )
+                except RuntimeError as error:
+                    status = "failed"
+                    session_id = result.session_id
+                    step_stderr = append_error(step_stderr, str(error))
+                else:
+                    agent.session_id = session_id
+            else:
+                session_id = result.session_id
             phase_result = AgentPhaseResult(
                 phase=phase,
                 prompt=prompt,
@@ -937,22 +1100,24 @@ class AutoResearch:
                 log_path=output_path,
                 stderr_path=stderr_path,
                 response_text=result.text,
-                stderr=result.stderr,
-                agent_session_id=result.session_id,
+                stderr=step_stderr,
+                agent_session_id=session_id,
             )
             finish_agent_step(
                 connection,
                 step_id=step_id,
                 status=status,
                 exit_code=result.exit_code,
-                agent_session_id=result.session_id,
+                agent_session_id=session_id,
                 response_text=result.text,
-                stderr=result.stderr,
+                stderr=step_stderr,
                 log_path=str(output_path.relative_to(self.repo_path)),
                 stderr_path=str(stderr_path.relative_to(self.repo_path)),
                 finished_at=utc_now(),
             )
             phase_results.append(phase_result)
+            if status == "failed" and result.exit_code == 0:
+                raise AgentSessionResumeError(step_stderr.strip())
             if status != "completed":
                 break
         return phase_results
@@ -965,6 +1130,7 @@ class AutoResearch:
         experiment_id: int,
         experiment_index: int,
         run_index: int,
+        expected_session_id: str | None,
     ) -> str:
         print("Agent phase: commit_message")
         prompt = build_commit_message_prompt()
@@ -989,23 +1155,62 @@ class AutoResearch:
             timeout_seconds=self.require_config().session.max_duration_seconds,
             text_capture="latest",
         )
+        step_stderr = result.stderr
         status = "completed" if result.exit_code == 0 else "failed"
+        if status == "completed":
+            try:
+                session_id = self.require_agent_session_id(
+                    expected_session_id=expected_session_id,
+                    returned_session_id=result.session_id,
+                    phase="commit_message",
+                )
+            except RuntimeError as error:
+                status = "failed"
+                session_id = result.session_id
+                step_stderr = append_error(step_stderr, str(error))
+            else:
+                agent.session_id = session_id
+        else:
+            session_id = result.session_id
         finish_agent_step(
             connection,
             step_id=step_id,
             status=status,
             exit_code=result.exit_code,
-            agent_session_id=result.session_id,
+            agent_session_id=session_id,
             response_text=result.text,
-            stderr=result.stderr,
+            stderr=step_stderr,
             log_path=str(output_path.relative_to(self.repo_path)),
             stderr_path=str(stderr_path.relative_to(self.repo_path)),
             finished_at=utc_now(),
         )
         commit_message = result.text.strip()
+        if status == "failed" and result.exit_code == 0:
+            raise AgentSessionResumeError(step_stderr.strip())
         if status != "completed" or not commit_message:
             raise RuntimeError("Agent failed to produce a commit message.")
         return commit_message
+
+    def require_agent_session_id(
+        self,
+        *,
+        expected_session_id: str | None,
+        returned_session_id: str | None,
+        phase: str,
+    ) -> str:
+        if expected_session_id is None:
+            if returned_session_id:
+                return returned_session_id
+            raise RuntimeError(
+                f"Agent did not return a resumable session id during {phase}."
+            )
+        if returned_session_id != expected_session_id:
+            raise RuntimeError(
+                "Agent failed to resume the previous session during "
+                f"{phase}. Expected {expected_session_id!r}, got "
+                f"{returned_session_id!r}."
+            )
+        return expected_session_id
 
     def build_agent_phase_prompt(
         self,

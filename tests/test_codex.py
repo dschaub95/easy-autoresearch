@@ -213,6 +213,63 @@ def test_codex_reuses_session_id_across_runs(
     ]
 
 
+def test_codex_extracts_thread_id_for_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_popen(*args, **kwargs):  # type: ignore[no-untyped-def]
+        command = args[0]
+        commands.append(command)
+        stdout_lines = (
+            [
+                '{"type":"thread.started","thread_id":"thread_123"}\n',
+                '{"text":"step"}\n',
+            ]
+            if len(commands) == 1
+            else ['{"text":"next"}\n']
+        )
+        return FakePopen(
+            command, stdout_lines=stdout_lines, stderr_lines=[], returncode=0
+        )
+
+    monkeypatch.setattr("easy_autoresearch.agent.codex.subprocess.Popen", fake_popen)
+    logs_dir(tmp_path).mkdir(parents=True)
+    codex = Codex(tmp_path)
+
+    first = codex.run("first prompt")
+    second = codex.run("second prompt")
+
+    assert first.session_id == "thread_123"
+    assert second.text == "next"
+    assert codex.session_id == "thread_123"
+    root = str(tmp_path.resolve())
+    assert commands == [
+        [
+            "codex",
+            "exec",
+            "--json",
+            "-s",
+            "workspace-write",
+            "-C",
+            root,
+            "first prompt",
+        ],
+        [
+            "codex",
+            "exec",
+            "--json",
+            "-s",
+            "workspace-write",
+            "-C",
+            root,
+            "resume",
+            "thread_123",
+            "second prompt",
+        ],
+    ]
+
+
 def test_codex_run_accumulates_text_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

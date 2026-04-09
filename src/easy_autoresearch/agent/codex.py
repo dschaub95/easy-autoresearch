@@ -17,7 +17,7 @@ from .base import AgentRunResult, CodingAgent
 
 def _session_id(value: Any) -> str | None:
     if isinstance(value, dict):
-        for key in ("session_id", "sessionId"):
+        for key in ("session_id", "sessionId", "thread_id"):
             if isinstance(value.get(key), str):
                 return value[key]
         for nested in value.values():

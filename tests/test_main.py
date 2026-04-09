@@ -16,7 +16,12 @@ from easy_autoresearch.config import (
     logs_dir,
 )
 from easy_autoresearch.git import GitWorktreeError
-from easy_autoresearch.main import CommandResult, main
+from easy_autoresearch.main import (
+    AgentSessionResumeError,
+    CommandResult,
+    ExperimentStepError,
+    main,
+)
 
 
 def write_config_updates(
@@ -981,6 +986,7 @@ def test_runtime_constraint_blocks_metric_promotion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     fake_git_tracking: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo_path = tmp_path / "project"
     baseline_results = command_results(
@@ -1076,8 +1082,13 @@ def test_runtime_constraint_blocks_metric_promotion(
     monkeypatch.setattr("builtins.input", lambda _: next(responses))
 
     exit_code = main(["--headless", str(repo_path)])
+    captured = capsys.readouterr()
 
     assert exit_code == 1
+    assert (
+        "Experiment 1 failed: Runtime constraint violated. Observed runtime 12.000s "
+        "exceeds cap 11.000s."
+    ) in captured.out
     summary_text = (
         repo_path / ".autoresearch" / "logs" / "summaries" / "experiment-1.md"
     ).read_text(encoding="utf-8")
@@ -1166,17 +1177,18 @@ def test_run_skips_repo_command_when_agent_phase_fails(
     class FailingAgent:
         def __init__(self) -> None:
             self.session_id = "sess-456"
-            self.calls = 0
 
         def run(self, prompt: str, **kwargs) -> AgentRunResult:
-            self.calls += 1
-            exit_code = 0 if self.calls < 3 else 1
+            is_execution = "phase: execution" in prompt
+            exit_code = 1 if is_execution else 0
             text = (
                 "initial plan"
-                if self.calls == 1
+                if "initial_planning" in kwargs["output_path"].stem
                 else "plan"
-                if self.calls == 2
+                if "phase: planning" in prompt
                 else "execution failed"
+                if is_execution
+                else "working"
             )
             kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
             kwargs["stderr_path"].write_text(
@@ -1329,6 +1341,245 @@ def test_non_improving_experiment_summary_marks_discarded(
             "FROM experiments ORDER BY id DESC LIMIT 1"
         ).fetchone()
     assert experiment == (2.0, 0, 1, None)
+
+
+def test_experiment_fails_if_summary_cannot_resume_previous_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_tracking: dict[str, object],
+) -> None:
+    repo_path = tmp_path / "project"
+    baseline_results = command_results(
+        CommandResult(
+            command="baseline",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(baseline_results),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    responses = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    main(["--headless", str(repo_path)])
+    write_config_updates(
+        repo_path,
+        run="python -c \"print('metric: 3.0')\"",
+        metric_pattern=r"^metric:\s+([\d.]+)",
+        max_experiments=1,
+        max_runs_per_experiment=1,
+    )
+
+    evaluation_results = command_results(
+        CommandResult(
+            command="run",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
+        CommandResult(
+            command="run",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+    )
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.session_id = "sess-123"
+
+        def run(self, prompt: str, **kwargs) -> AgentRunResult:
+            text = (
+                "Refine evaluation workflow"
+                if "Write the git commit message" in prompt
+                else (
+                    "Main idea\n- Improve the metric.\n\nSteps taken\n- Updated the implementation."
+                    if "Summarize this experiment in plain text" in prompt
+                    else "working"
+                )
+            )
+            session_id = (
+                None
+                if "Summarize this experiment in plain text" in prompt
+                else self.session_id
+            )
+            kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
+            kwargs["stderr_path"].write_text("", encoding="utf-8")
+            return AgentRunResult(
+                exit_code=0,
+                output_path=kwargs["output_path"],
+                stderr_path=kwargs["stderr_path"],
+                session_id=session_id,
+                text=text,
+                stderr="",
+            )
+
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent", lambda config, repo_path: FakeAgent()
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(evaluation_results),
+    )
+    responses = iter(["c", "y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+
+    with pytest.raises(
+        AgentSessionResumeError,
+        match="Agent failed to resume the previous session during summary.",
+    ):
+        main(["--headless", str(repo_path)])
+
+    summary_stderr = (
+        repo_path
+        / ".autoresearch"
+        / "logs"
+        / "agent-stderr"
+        / "experiment-1.summary.log"
+    ).read_text(encoding="utf-8")
+    assert (
+        "Agent failed to resume the previous session during summary." in summary_stderr
+    )
+    with sqlite3.connect(db_path(repo_path)) as connection:
+        experiment = connection.execute(
+            "SELECT status, metric_improved, changes_discarded, agent_session_id, summary_path "
+            "FROM experiments ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        session = connection.execute(
+            "SELECT status FROM sessions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert experiment == ("failed", 0, 1, "sess-123", None)
+    assert session == ("failed",)
+
+
+def test_experiment_fails_if_summary_generation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_tracking: dict[str, object],
+) -> None:
+    repo_path = tmp_path / "project"
+    baseline_results = command_results(
+        CommandResult(
+            command="baseline",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(baseline_results),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    responses = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    main(["--headless", str(repo_path)])
+    write_config_updates(
+        repo_path,
+        run="python -c \"print('metric: 3.0')\"",
+        metric_pattern=r"^metric:\s+([\d.]+)",
+        max_experiments=1,
+        max_runs_per_experiment=1,
+    )
+
+    evaluation_results = command_results(
+        CommandResult(
+            command="run",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
+        CommandResult(
+            command="run",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+    )
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.session_id = "sess-123"
+
+        def run(self, prompt: str, **kwargs) -> AgentRunResult:
+            exit_code = 1 if "Summarize this experiment in plain text" in prompt else 0
+            text = "working"
+            kwargs["output_path"].write_text('{"text":"ok"}\n', encoding="utf-8")
+            kwargs["stderr_path"].write_text(
+                "summary boom\n" if exit_code else "", encoding="utf-8"
+            )
+            return AgentRunResult(
+                exit_code=exit_code,
+                output_path=kwargs["output_path"],
+                stderr_path=kwargs["stderr_path"],
+                session_id=self.session_id,
+                text=text,
+                stderr="summary boom\n" if exit_code else "",
+            )
+
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent", lambda config, repo_path: FakeAgent()
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(evaluation_results),
+    )
+    responses = iter(["c", "y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+
+    with pytest.raises(
+        ExperimentStepError, match="Agent failed to produce an experiment summary."
+    ):
+        main(["--headless", str(repo_path)])
+
+    with sqlite3.connect(db_path(repo_path)) as connection:
+        experiment = connection.execute(
+            "SELECT status, metric_improved, changes_discarded, summary_path "
+            "FROM experiments ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        session = connection.execute(
+            "SELECT status FROM sessions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert experiment == ("failed", 0, 1, None)
+    assert session == ("failed",)
 
 
 def test_run_session_fails_fast_for_dirty_git_worktree(
