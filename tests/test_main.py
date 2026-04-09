@@ -204,7 +204,7 @@ def test_run_scaffolds_and_starts_session(
         ("candidate", "completed", 3.0, "codex"),
     ]
     assert runs == [
-        ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
+        ("completed", 0, 3.0, ".autoresearch/logs/runs/unmodified-baseline.log"),
         ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
     ]
     assert fake_git_tracking["session_branch_calls"] == [1]
@@ -886,9 +886,9 @@ def test_run_uses_coding_agent_for_candidate_experiments(
         ),
     ]
     assert runs == [
-        ("failed", 1, 1.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
+        ("failed", 1, 1.0, ".autoresearch/logs/runs/unmodified-baseline.log"),
         ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
-        ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
+        ("failed", 1, 2.0, ".autoresearch/logs/runs/unmodified-baseline.log"),
         ("failed", 1, 1.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
         ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-1-run-2.log"),
         ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-2-run-1.log"),

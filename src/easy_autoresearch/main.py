@@ -19,6 +19,7 @@ from typing import Literal
 from .agent import Codex, CodingAgent
 from .app.server import DashboardServer, run_dashboard_server
 from .config import (
+    DEFAULT_BASELINE_LOG,
     AutoResearchConfig,
     config_path,
     db_path,
@@ -414,6 +415,9 @@ class AutoResearch:
     def run_log_path(self, experiment_index: int, run_index: int) -> Path:
         return self.run_logs_dir / f"experiment-{experiment_index}-run-{run_index}.log"
 
+    def baseline_log_path(self) -> Path:
+        return self.run_logs_dir / DEFAULT_BASELINE_LOG
+
     def summary_path_for_experiment(self, experiment_index: int) -> Path:
         return self.summary_logs_dir / f"experiment-{experiment_index}.md"
 
@@ -464,7 +468,6 @@ class AutoResearch:
                 baseline_result = self.run_baseline_experiment(
                     connection,
                     experiment_id=baseline_experiment_id,
-                    experiment_index=1,
                 )
                 self.baseline_runtime_seconds = baseline_result.best_runtime_seconds
                 self.runtime_cap_seconds = self.resolve_runtime_cap_seconds(
@@ -542,7 +545,6 @@ class AutoResearch:
         connection,
         *,
         experiment_id: int,
-        experiment_index: int,
     ) -> ExperimentResult:
         config = self.require_config()
         run_index = 1
@@ -563,7 +565,7 @@ class AutoResearch:
             timeout_seconds=config.session.max_duration_seconds,
             metric_pattern=config.commands.metric_pattern,
         )
-        log_path = self.run_log_path(experiment_index, run_index)
+        log_path = self.baseline_log_path()
         log_path.write_text(result.stdout, encoding="utf-8")
         finish_run(
             connection,

@@ -14,7 +14,7 @@ DB_FILENAME = "state.db"
 PROMPTS_DIRNAME = "prompts"
 LOGS_DIRNAME = "logs"
 DASHBOARD_STATE_FILENAME = "dashboard.json"
-DEFAULT_BASELINE_LOG = "baseline.log"
+DEFAULT_BASELINE_LOG = "unmodified-baseline.log"
 
 
 def config_path(repo_path: Path) -> Path:
