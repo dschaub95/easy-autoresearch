@@ -102,6 +102,12 @@ def build_initial_planning_prompt(
                 f"- SQLite state database: `{database_path}`"
             ),
             (
+                "You are not allowed to cheat, e.g., by switching the machine learning task, the metric, or the dataset. However you are allowed "
+                "to modify every other part of the pipeline. This can include switching to a completely different class of models, e.g., "
+                "from a neural network to an SVM, or from a convolutional neural network to a transformer. It might also be "
+                "necessary to go really deep into the weeds and write custom cuda code (or other low-level code) to balance speed and performance."
+            ),
+            (
                 "This step is read-only. Do not edit any files yet. Come up with one new "
                 "high-level idea to improve the evaluation metric."
             ),
