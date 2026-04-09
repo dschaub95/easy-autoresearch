@@ -185,7 +185,7 @@ def test_run_scaffolds_and_starts_session(
     assert config["agent"]["model"] == "gpt-5.4-mini"
     assert config["agent"]["sandbox_mode"] == "workspace-write"
     assert config["agent"]["prompt_template"] == ".autoresearch/prompts/codex-system.md"
-    assert config["constraints"] == {"runtime": 1.1}
+    assert config["constraints"] == {"runtime": 1.5}
 
     with sqlite3.connect(db_path(repo_path)) as connection:
         sessions = connection.execute(

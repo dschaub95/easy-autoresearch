@@ -74,7 +74,7 @@ class AgentConfig:
 
 @dataclass(slots=True)
 class ConstraintsConfig:
-    runtime: int | float | str | None = 1.1
+    runtime: int | float | str | None = 1.5
 
 
 @dataclass(slots=True)
