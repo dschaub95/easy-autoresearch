@@ -124,6 +124,27 @@ def create_agent(config: AutoResearchConfig, repo_path: Path) -> CodingAgent:
     )
 
 
+def ensure_setup_entries_in_gitignore(repo_path: Path) -> None:
+    gitignore_path = repo_path / ".gitignore"
+    required_entries = (".autoresearch", "autoresearch.yaml", ".codex")
+    existing_lines = (
+        gitignore_path.read_text(encoding="utf-8").splitlines()
+        if gitignore_path.exists()
+        else []
+    )
+    missing_entries = [
+        entry for entry in required_entries if entry not in set(existing_lines)
+    ]
+    if not missing_entries:
+        return
+
+    updated_lines = list(existing_lines)
+    if updated_lines and updated_lines[-1] != "":
+        updated_lines.append("")
+    updated_lines.extend(missing_entries)
+    gitignore_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+
+
 class AutoResearch:
     """Session-scoped application state and workflow."""
 
@@ -159,6 +180,7 @@ class AutoResearch:
 
     def scaffold_repo(self) -> None:
         self.repo_path.mkdir(parents=True, exist_ok=True)
+        ensure_setup_entries_in_gitignore(self.repo_path)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.ensure_log_directories()
         self.prompts_dir.mkdir(parents=True, exist_ok=True)

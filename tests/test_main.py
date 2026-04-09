@@ -205,6 +205,39 @@ def test_run_scaffolds_and_starts_session(
     assert fake_git_tracking["session_branch_calls"] == [1]
 
 
+def test_scaffold_repo_creates_gitignore_with_autoresearch_entries(
+    tmp_path: Path,
+) -> None:
+    repo_path = tmp_path / "repo"
+
+    autoresearch = main_module.AutoResearch(repo_path, headless=True)
+
+    autoresearch.scaffold_repo()
+
+    assert (repo_path / ".gitignore").read_text(encoding="utf-8") == (
+        ".autoresearch\nautoresearch.yaml\n.codex\n"
+    )
+
+
+def test_scaffold_repo_appends_missing_gitignore_entries_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".gitignore").write_text(
+        "__pycache__/\nautoresearch.yaml\n", encoding="utf-8"
+    )
+
+    autoresearch = main_module.AutoResearch(repo_path, headless=True)
+
+    autoresearch.scaffold_repo()
+    autoresearch.scaffold_repo()
+
+    assert (repo_path / ".gitignore").read_text(encoding="utf-8") == (
+        "__pycache__/\nautoresearch.yaml\n\n.autoresearch\n.codex\n"
+    )
+
+
 def test_setup_can_be_cancelled_for_config_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1154,7 +1187,7 @@ def test_run_skips_repo_command_when_agent_phase_fails(
     responses = iter(["c", "y", "y"])
     monkeypatch.setattr("builtins.input", lambda _: next(responses))
 
-    exit_code = main([str(repo_path)])
+    exit_code = main(["--headless", str(repo_path)])
 
     assert exit_code == 1
     assert evaluation_calls == ["python -c \"print('metric: 1.0')\""]
@@ -1386,7 +1419,7 @@ def test_run_overwrites_existing_setup(
     )
     responses = iter(["y", "y", "y", "y", "y"])
     monkeypatch.setattr("builtins.input", lambda _: next(responses))
-    main([str(repo_path)])
+    main(["--headless", str(repo_path)])
     stale_log = repo_path / STATE_DIRNAME / "stale.txt"
     stale_log.write_text("stale", encoding="utf-8")
     write_config_updates(

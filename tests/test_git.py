@@ -28,7 +28,7 @@ def init_repo(repo_path: Path) -> None:
     run_git(repo_path, "config", "user.email", "test@example.com")
 
 
-def test_has_uncommitted_changes_ignores_autoresearch_state_and_codex_config(
+def test_has_uncommitted_changes_ignores_autoresearch_state_and_config(
     tmp_path: Path,
 ) -> None:
     repo_path = tmp_path / "repo"
@@ -41,15 +41,12 @@ def test_has_uncommitted_changes_ignores_autoresearch_state_and_codex_config(
 
     (repo_path / ".autoresearch").mkdir()
     (repo_path / ".autoresearch" / "state.db").write_text("db\n", encoding="utf-8")
-    (repo_path / ".codex").mkdir()
-    (repo_path / ".codex" / "autoresearch.yaml").write_text(
-        "temp: true\n", encoding="utf-8"
-    )
+    (repo_path / "autoresearch.yaml").write_text("temp: true\n", encoding="utf-8")
 
     assert has_uncommitted_changes(repo_path) is False
 
 
-def test_commit_all_changes_excludes_autoresearch_state_and_codex_config(
+def test_commit_all_changes_excludes_autoresearch_state_and_config(
     tmp_path: Path,
 ) -> None:
     repo_path = tmp_path / "repo"
@@ -59,16 +56,9 @@ def test_commit_all_changes_excludes_autoresearch_state_and_codex_config(
     (repo_path / "tracked.txt").write_text("base\n", encoding="utf-8")
     (repo_path / ".autoresearch").mkdir()
     (repo_path / ".autoresearch" / "notes.txt").write_text("base\n", encoding="utf-8")
-    (repo_path / ".codex").mkdir()
-    (repo_path / ".codex" / "autoresearch.yaml").write_text(
-        "value: old\n", encoding="utf-8"
-    )
+    (repo_path / "autoresearch.yaml").write_text("value: old\n", encoding="utf-8")
     run_git(
-        repo_path,
-        "add",
-        "tracked.txt",
-        ".autoresearch/notes.txt",
-        ".codex/autoresearch.yaml",
+        repo_path, "add", "tracked.txt", ".autoresearch/notes.txt", "autoresearch.yaml"
     )
     run_git(repo_path, "commit", "-m", "initial")
 
@@ -76,9 +66,7 @@ def test_commit_all_changes_excludes_autoresearch_state_and_codex_config(
     (repo_path / ".autoresearch" / "notes.txt").write_text(
         "updated\n", encoding="utf-8"
     )
-    (repo_path / ".codex" / "autoresearch.yaml").write_text(
-        "value: new\n", encoding="utf-8"
-    )
+    (repo_path / "autoresearch.yaml").write_text("value: new\n", encoding="utf-8")
 
     commit_all_changes(repo_path, "managed commit")
 
@@ -89,7 +77,7 @@ def test_commit_all_changes_excludes_autoresearch_state_and_codex_config(
 
     status_lines = run_git(repo_path, "status", "--short").stdout.splitlines()
     assert " M .autoresearch/notes.txt" in status_lines
-    assert " M .codex/autoresearch.yaml" in status_lines
+    assert " M autoresearch.yaml" in status_lines
 
 
 def test_switch_to_session_branch_creates_and_checks_out_session_branch(

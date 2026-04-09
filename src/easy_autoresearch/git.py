@@ -9,7 +9,11 @@ from pathlib import Path
 
 EXCLUDED_PATHSPECS = (
     ":(exclude).autoresearch",
-    ":(exclude).codex/autoresearch.yaml",
+    ":(exclude)autoresearch.yaml",
+)
+EXCLUDED_COMMIT_PATHS = (
+    ".autoresearch",
+    "autoresearch.yaml",
 )
 SESSION_BRANCH_PREFIX = "autoresearch/session"
 
@@ -148,7 +152,8 @@ def restore_worktree_snapshot(repo_path: Path, snapshot_dir: Path) -> None:
 
 
 def commit_all_changes(repo_path: Path, message: str) -> str:
-    _run_git(repo_path, "add", "-A", *_managed_pathspecs())
+    _run_git(repo_path, "add", "-A", "--", ".")
+    _run_git(repo_path, "reset", "-q", "HEAD", "--", *EXCLUDED_COMMIT_PATHS)
     git_env = os.environ | {
         "GIT_AUTHOR_NAME": "easy-autoresearch",
         "GIT_AUTHOR_EMAIL": "easy-autoresearch@example.com",
