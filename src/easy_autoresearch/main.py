@@ -513,7 +513,6 @@ class AutoResearch:
                         session_best_metric = experiment_result.best_metric
                     if experiment_result.status == "completed":
                         session_status = "completed"
-                        break
                     if experiment_result.failure_reason:
                         print(
                             f"Experiment {experiment_index} failed: "

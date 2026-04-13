@@ -60,7 +60,7 @@ class SessionConfig:
 
 @dataclass(slots=True)
 class ExperimentsConfig:
-    max_experiments: int = 1
+    max_experiments: int = 3
     max_runs_per_experiment: int = 1
 
 

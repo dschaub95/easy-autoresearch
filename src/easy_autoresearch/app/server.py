@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener
 
 import uvicorn
 from fastapi import FastAPI
@@ -81,8 +81,11 @@ class DashboardServer:
         return f"http://{host}:{port}/health"
 
     def _is_healthy(self, host: str, port: int) -> bool:
+        # Do not use HTTP(S)_PROXY for loopback; corporate VPNs often set those and
+        # proxies block or mishandle http://127.0.0.1/...
+        opener = build_opener(ProxyHandler({}))
         try:
-            with urlopen(self._health_url(host, port), timeout=0.3) as response:
+            with opener.open(self._health_url(host, port), timeout=0.3) as response:
                 return response.status == 200
         except (OSError, URLError):
             return False

@@ -33,7 +33,7 @@ and stores the outputs, but it does not yet ask Codex to propose code changes.
    - **Evaluation:** After the three phases succeed, the same `commands.run` used for the baseline runs again. The result must yield a metric when `metric_pattern` is set, and must satisfy the runtime cap when configured. The best metric seen in this experiment is kept via a **worktree snapshot** so retries can roll back and retry from a known-good tree.
    - **End of experiment:** The tool writes an experiment summary (agent-assisted), then either **commits** all changes if the metric improved versus the session’s best so far, or **discards** uncommitted changes. Session best metric updates when a candidate improves it.
 
-6. **Finish.** The session completes when the baseline succeeds with no candidates (`max_experiments: 0`), or when a candidate experiment completes successfully (`commands.run` exits cleanly under the recorded constraints). Otherwise it ends after all configured attempts. Every step above is persisted: sessions, experiments, runs, and per-phase agent steps in SQLite, with logs under `.autoresearch/logs/`.
+6. **Finish.** The session completes when the baseline succeeds with no candidates (`max_experiments: 0`), or after all configured candidate experiments have run. If any candidate experiment completes successfully (`commands.run` exits cleanly under the recorded constraints), the overall session is marked completed, but the remaining configured experiments still run. Every step above is persisted: sessions, experiments, runs, and per-phase agent steps in SQLite, with logs under `.autoresearch/logs/`.
 
 At a high level (pseudocode, not literal source):
 
@@ -66,7 +66,7 @@ for each candidate_experiment in 1 .. max_experiments:
         if eval.success and metric_ok(eval) and within_runtime_cap(eval):
             promote_if_best_in_experiment(eval)  // snapshot worktree when metric improves
         if eval.success:
-            break run loop  // candidate experiment succeeded
+            break run loop  // this candidate experiment succeeded
 
     write_summary_via_agent()
     if metric_improved_vs_session_best:
@@ -75,10 +75,7 @@ for each candidate_experiment in 1 .. max_experiments:
     else:
         discard_uncommitted()
 
-    if candidate_experiment succeeded:
-        finish_session(completed); return
-
-finish_session(failed_or_exhausted)
+finish_session(completed_if_any_candidate_succeeded_else_failed_or_exhausted)
 ```
 
 ## CLI
@@ -129,7 +126,7 @@ Starting a session:
 - for candidate experiments, runs three consecutive agent calls in the same session
   before executing the shared `commands.run`
 - stores each run's output and metric in SQLite
-- stops early when an experiment completes successfully
+- attempts up to `experiments.max_experiments` candidate experiments, without stopping early after the first successful one
 - serves a local dashboard while the session is running
 
 ## Default Config Shape
@@ -144,7 +141,7 @@ commands:
 session:
   max_duration_seconds: 3600
 experiments:
-  max_experiments: 1
+  max_experiments: 3
   max_runs_per_experiment: 1
 agent:
   provider: codex

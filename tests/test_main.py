@@ -12,6 +12,9 @@ from easy_autoresearch.config import (
     DB_FILENAME,
     PROMPTS_DIRNAME,
     STATE_DIRNAME,
+    AutoResearchConfig,
+    ExperimentsConfig,
+    ProjectConfig,
     db_path,
     logs_dir,
 )
@@ -160,6 +163,22 @@ def test_run_scaffolds_and_starts_session(
             status="completed",
             metric_value=3.0,
         ),
+        CommandResult(
+            command="candidate",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
     )
     monkeypatch.setattr(
         "easy_autoresearch.main.run_command", lambda *args, **kwargs: next(results)
@@ -202,10 +221,14 @@ def test_run_scaffolds_and_starts_session(
     assert experiments == [
         ("baseline", "completed", 3.0, None),
         ("candidate", "completed", 3.0, "codex"),
+        ("candidate", "completed", 3.0, "codex"),
+        ("candidate", "completed", 3.0, "codex"),
     ]
     assert runs == [
         ("completed", 0, 3.0, ".autoresearch/logs/runs/unmodified-baseline.log"),
         ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
+        ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-2-run-1.log"),
+        ("completed", 0, 3.0, ".autoresearch/logs/runs/experiment-3-run-1.log"),
     ]
     assert fake_git_tracking["session_branch_calls"] == [1]
 
@@ -423,6 +446,13 @@ def test_session_branch_is_created_before_repo_setup(
         lambda config, repo_path: RecordingSetupAgent(),
     )
     monkeypatch.setattr(
+        "easy_autoresearch.main.default_config_for_repo",
+        lambda path: AutoResearchConfig(
+            project=ProjectConfig(repo_path=str(path.resolve()), name=path.name),
+            experiments=ExperimentsConfig(max_experiments=1),
+        ),
+    )
+    monkeypatch.setattr(
         "easy_autoresearch.main.switch_to_session_branch",
         lambda _, session_id: (
             events.append("branch") or f"autoresearch/session-{session_id}"
@@ -494,6 +524,22 @@ def test_run_starts_dashboard_server_and_prints_selected_url(
     results = command_results(
         CommandResult(
             command="baseline",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+        CommandResult(
+            command="candidate",
             exit_code=0,
             stdout="metric: 3.0\n",
             stderr="",
@@ -724,6 +770,22 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             status="failed",
             metric_value=2.0,
         ),
+        CommandResult(
+            command="candidate",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
     )
     monkeypatch.setattr(
         "easy_autoresearch.main.run_command",
@@ -857,6 +919,32 @@ def test_run_uses_coding_agent_for_candidate_experiments(
             ".autoresearch/logs/summaries/experiment-1.md",
             1,
         ),
+        (
+            "candidate",
+            "failed",
+            2.0,
+            2.0,
+            0,
+            1,
+            None,
+            "codex",
+            "setup-session",
+            ".autoresearch/logs/summaries/experiment-2.md",
+            1,
+        ),
+        (
+            "candidate",
+            "failed",
+            2.0,
+            2.0,
+            0,
+            1,
+            None,
+            "codex",
+            "setup-session",
+            ".autoresearch/logs/summaries/experiment-3.md",
+            1,
+        ),
         ("baseline", "failed", 2.0, None, None, None, None, None, None, None, 1),
         (
             "candidate",
@@ -888,6 +976,8 @@ def test_run_uses_coding_agent_for_candidate_experiments(
     assert runs == [
         ("failed", 1, 1.0, ".autoresearch/logs/runs/unmodified-baseline.log"),
         ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
+        ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-2-run-1.log"),
+        ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-3-run-1.log"),
         ("failed", 1, 2.0, ".autoresearch/logs/runs/unmodified-baseline.log"),
         ("failed", 1, 1.0, ".autoresearch/logs/runs/experiment-1-run-1.log"),
         ("failed", 1, 2.0, ".autoresearch/logs/runs/experiment-1-run-2.log"),
@@ -1025,6 +1115,13 @@ def test_runtime_constraint_blocks_metric_promotion(
         "easy_autoresearch.main.create_agent",
         lambda config, repo_path: NoOpSetupAgent(),
     )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.default_config_for_repo",
+        lambda path: AutoResearchConfig(
+            project=ProjectConfig(repo_path=str(path.resolve()), name=path.name),
+            experiments=ExperimentsConfig(max_experiments=1),
+        ),
+    )
     responses = iter(["y", "y"])
     monkeypatch.setattr("builtins.input", lambda _: next(responses))
     main(["--headless", str(repo_path)])
@@ -1149,6 +1246,22 @@ def test_run_skips_repo_command_when_agent_phase_fails(
             status="failed",
             metric_value=1.0,
         ),
+        CommandResult(
+            command="candidate",
+            exit_code=1,
+            stdout="metric: 1.0\n",
+            stderr="",
+            status="failed",
+            metric_value=1.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=1,
+            stdout="metric: 1.0\n",
+            stderr="",
+            status="failed",
+            metric_value=1.0,
+        ),
     )
     monkeypatch.setattr(
         "easy_autoresearch.main.run_command",
@@ -1248,6 +1361,22 @@ def test_non_improving_experiment_summary_marks_discarded(
     baseline_results = command_results(
         CommandResult(
             command="baseline",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=1,
+            stdout="metric: 2.0\n",
+            stderr="",
+            status="failed",
+            metric_value=2.0,
+        ),
+        CommandResult(
+            command="candidate",
             exit_code=1,
             stdout="metric: 2.0\n",
             stderr="",
@@ -1383,6 +1512,13 @@ def test_experiment_fails_if_summary_cannot_resume_previous_session(
         "easy_autoresearch.main.create_agent",
         lambda config, repo_path: NoOpSetupAgent(),
     )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.default_config_for_repo",
+        lambda path: AutoResearchConfig(
+            project=ProjectConfig(repo_path=str(path.resolve()), name=path.name),
+            experiments=ExperimentsConfig(max_experiments=1),
+        ),
+    )
     responses = iter(["y", "y"])
     monkeypatch.setattr("builtins.input", lambda _: next(responses))
     main(["--headless", str(repo_path)])
@@ -1512,6 +1648,13 @@ def test_experiment_fails_if_summary_generation_fails(
     monkeypatch.setattr(
         "easy_autoresearch.main.create_agent",
         lambda config, repo_path: NoOpSetupAgent(),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.default_config_for_repo",
+        lambda path: AutoResearchConfig(
+            project=ProjectConfig(repo_path=str(path.resolve()), name=path.name),
+            experiments=ExperimentsConfig(max_experiments=1),
+        ),
     )
     responses = iter(["y", "y"])
     monkeypatch.setattr("builtins.input", lambda _: next(responses))
@@ -1664,6 +1807,43 @@ def test_run_overwrites_existing_setup(
             metric_value=7.0,
         ),
         CommandResult(
+            command="initial-candidate",
+            exit_code=0,
+            stdout="metric: 7.0\n",
+            stderr="",
+            status="completed",
+            metric_value=7.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(initial_results),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.default_config_for_repo",
+        lambda path: AutoResearchConfig(
+            project=ProjectConfig(repo_path=str(path.resolve()), name=path.name),
+            experiments=ExperimentsConfig(max_experiments=1),
+        ),
+    )
+    responses = iter(["y", "y", "y", "y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    main(["--headless", str(repo_path)])
+    stale_log = repo_path / STATE_DIRNAME / "stale.txt"
+    stale_log.write_text("stale", encoding="utf-8")
+    write_config_updates(
+        repo_path,
+        run="python -c \"print('metric: 7.0')\"",
+        metric_pattern=r"^metric:\s+([\d.]+)",
+        max_experiments=1,
+    )
+
+    overwrite_results = command_results(
+        CommandResult(
             command="overwrite",
             exit_code=0,
             stdout="metric: 7.0\n",
@@ -1682,21 +1862,7 @@ def test_run_overwrites_existing_setup(
     )
     monkeypatch.setattr(
         "easy_autoresearch.main.run_command",
-        lambda *args, **kwargs: next(initial_results),
-    )
-    monkeypatch.setattr(
-        "easy_autoresearch.main.create_agent",
-        lambda config, repo_path: NoOpSetupAgent(),
-    )
-    responses = iter(["y", "y", "y", "y", "y"])
-    monkeypatch.setattr("builtins.input", lambda _: next(responses))
-    main(["--headless", str(repo_path)])
-    stale_log = repo_path / STATE_DIRNAME / "stale.txt"
-    stale_log.write_text("stale", encoding="utf-8")
-    write_config_updates(
-        repo_path,
-        run="python -c \"print('metric: 7.0')\"",
-        metric_pattern=r"^metric:\s+([\d.]+)",
+        lambda *args, **kwargs: next(overwrite_results),
     )
 
     exit_code = main(["--headless", "--overwrite", str(repo_path)])
@@ -1714,6 +1880,22 @@ def test_yes_flag_skips_interactive_prompts(
     results = command_results(
         CommandResult(
             command="baseline",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+        CommandResult(
+            command="candidate",
+            exit_code=0,
+            stdout="metric: 3.0\n",
+            stderr="",
+            status="completed",
+            metric_value=3.0,
+        ),
+        CommandResult(
+            command="candidate",
             exit_code=0,
             stdout="metric: 3.0\n",
             stderr="",
@@ -1769,6 +1951,41 @@ def test_yes_flag_still_prompts_for_existing_setup_choice(
             metric_value=7.0,
         ),
         CommandResult(
+            command="initial-candidate",
+            exit_code=0,
+            stdout="metric: 7.0\n",
+            stderr="",
+            status="completed",
+            metric_value=7.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.run_command",
+        lambda *args, **kwargs: next(initial_results),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.create_agent",
+        lambda config, repo_path: NoOpSetupAgent(),
+    )
+    monkeypatch.setattr(
+        "easy_autoresearch.main.default_config_for_repo",
+        lambda path: AutoResearchConfig(
+            project=ProjectConfig(repo_path=str(path.resolve()), name=path.name),
+            experiments=ExperimentsConfig(max_experiments=1),
+        ),
+    )
+    responses = iter(["y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    main(["--headless", str(repo_path)])
+    write_config_updates(
+        repo_path,
+        run="python -c \"print('metric: 7.0')\"",
+        metric_pattern=r"^metric:\s+([\d.]+)",
+        max_experiments=1,
+    )
+
+    continue_results = command_results(
+        CommandResult(
             command="overwrite",
             exit_code=0,
             stdout="metric: 7.0\n",
@@ -1787,15 +2004,8 @@ def test_yes_flag_still_prompts_for_existing_setup_choice(
     )
     monkeypatch.setattr(
         "easy_autoresearch.main.run_command",
-        lambda *args, **kwargs: next(initial_results),
+        lambda *args, **kwargs: next(continue_results),
     )
-    monkeypatch.setattr(
-        "easy_autoresearch.main.create_agent",
-        lambda config, repo_path: NoOpSetupAgent(),
-    )
-    responses = iter(["y", "y"])
-    monkeypatch.setattr("builtins.input", lambda _: next(responses))
-    main(["--headless", str(repo_path)])
 
     prompted: list[str] = []
 

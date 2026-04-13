@@ -1,3 +1,5 @@
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -328,3 +330,32 @@ def test_dashboard_server_kills_spawned_process_when_health_check_never_succeeds
         server.start()
 
     assert observed["kill"] == (4321, 15)
+
+
+def test_dashboard_health_check_ignores_http_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/health":
+                self.send_response(200)
+                self.end_headers()
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+        monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+        dashboard = DashboardServer(repo_path=tmp_path)
+        assert dashboard._is_healthy("127.0.0.1", port) is True
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
